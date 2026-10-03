@@ -1,0 +1,4 @@
+.env
+pontaj.db
+__pycache__/
+venv/
