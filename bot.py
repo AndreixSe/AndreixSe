@@ -1,4 +1,3 @@
-````python
 import os
 import sqlite3
 from datetime import datetime
@@ -274,7 +273,6 @@ def create_panel_embed(
 
     else:
 
-        # Header tabel
         lines = [
             "```",
             "#   NUME                         ORA",
@@ -288,7 +286,6 @@ def create_panel_embed(
 
             name = user["display_name"]
 
-            # Limităm numele pentru a nu rupe tabelul
             if len(name) > 24:
                 name = name[:21] + "..."
 
@@ -385,10 +382,6 @@ class PresenceView(
         button: discord.ui.Button
     ):
 
-        # -------------------------------------------------
-        # Verificăm sesiunea
-        # -------------------------------------------------
-
         if not is_session_active():
 
             await interaction.response.send_message(
@@ -405,10 +398,6 @@ class PresenceView(
             get_current_session_id()
         )
 
-        # -------------------------------------------------
-        # Avatar
-        # -------------------------------------------------
-
         avatar_url = None
 
         if user.display_avatar:
@@ -417,16 +406,8 @@ class PresenceView(
                 user.display_avatar.url
             )
 
-        # -------------------------------------------------
-        # Database
-        # -------------------------------------------------
-
         conn = get_db()
         cur = conn.cursor()
-
-        # -------------------------------------------------
-        # Verificăm dacă este deja prezent
-        # -------------------------------------------------
 
         cur.execute("""
             SELECT id
@@ -451,10 +432,6 @@ class PresenceView(
 
             return
 
-        # -------------------------------------------------
-        # Adăugăm persoana
-        # -------------------------------------------------
-
         current_time = now_local().isoformat()
 
         cur.execute("""
@@ -477,18 +454,10 @@ class PresenceView(
         conn.commit()
         conn.close()
 
-        # -------------------------------------------------
-        # Răspuns
-        # -------------------------------------------------
-
         await interaction.response.send_message(
             "🟢 Ai fost adăugat în lista de prezență.",
             ephemeral=True
         )
-
-        # -------------------------------------------------
-        # Actualizăm panoul
-        # -------------------------------------------------
 
         await update_panel()
 
@@ -508,10 +477,6 @@ class PresenceView(
         button: discord.ui.Button
     ):
 
-        # -------------------------------------------------
-        # Verificăm sesiunea
-        # -------------------------------------------------
-
         if not is_session_active():
 
             await interaction.response.send_message(
@@ -527,10 +492,6 @@ class PresenceView(
         session_id = (
             get_current_session_id()
         )
-
-        # -------------------------------------------------
-        # Database
-        # -------------------------------------------------
 
         conn = get_db()
         cur = conn.cursor()
@@ -558,10 +519,6 @@ class PresenceView(
 
             return
 
-        # -------------------------------------------------
-        # Ștergem persoana din lista curentă
-        # -------------------------------------------------
-
         cur.execute("""
             DELETE FROM attendance
             WHERE session_id = ?
@@ -574,18 +531,10 @@ class PresenceView(
         conn.commit()
         conn.close()
 
-        # -------------------------------------------------
-        # Răspuns
-        # -------------------------------------------------
-
         await interaction.response.send_message(
             "🔴 Ai fost scos din lista de prezență.",
             ephemeral=True
         )
-
-        # -------------------------------------------------
-        # Actualizăm panoul
-        # -------------------------------------------------
 
         await update_panel()
 
@@ -612,10 +561,6 @@ async def update_panel():
 
     try:
 
-        # -------------------------------------------------
-        # Canal
-        # -------------------------------------------------
-
         channel = bot.get_channel(
             int(channel_id)
         )
@@ -626,17 +571,9 @@ async def update_panel():
                 int(channel_id)
             )
 
-        # -------------------------------------------------
-        # Mesaj
-        # -------------------------------------------------
-
         message = await channel.fetch_message(
             int(message_id)
         )
-
-        # -------------------------------------------------
-        # Actualizare
-        # -------------------------------------------------
 
         await message.edit(
             content=None,
@@ -675,10 +612,6 @@ async def setup_prezenta(
     interaction: discord.Interaction
 ):
 
-    # =====================================================
-    # ADMIN
-    # =====================================================
-
     if not interaction.user.guild_permissions.administrator:
 
         await interaction.response.send_message(
@@ -691,10 +624,6 @@ async def setup_prezenta(
     await interaction.response.defer(
         ephemeral=True
     )
-
-    # =====================================================
-    # ȘTERGEM VECHIUL PANEL
-    # =====================================================
 
     old_channel_id = get_setting(
         "panel_channel_id",
@@ -736,10 +665,6 @@ async def setup_prezenta(
                 f"Nu am putut șterge panoul vechi: {e}"
             )
 
-    # =====================================================
-    # SESIUNE NOUĂ
-    # =====================================================
-
     old_session = get_current_session_id()
 
     new_session = old_session + 1
@@ -754,10 +679,6 @@ async def setup_prezenta(
         "1"
     )
 
-    # =====================================================
-    # CURĂȚĂM SESIUNEA NOUĂ
-    # =====================================================
-
     conn = get_db()
     cur = conn.cursor()
 
@@ -769,20 +690,12 @@ async def setup_prezenta(
     conn.commit()
     conn.close()
 
-    # =====================================================
-    # CREĂM PANELUL
-    # =====================================================
-
     channel = interaction.channel
 
     message = await channel.send(
         embed=create_panel_embed(),
         view=PresenceView()
     )
-
-    # =====================================================
-    # SALVĂM PANELUL
-    # =====================================================
 
     set_setting(
         "panel_channel_id",
@@ -805,10 +718,6 @@ async def setup_prezenta(
     print(
         f"Mesaj: {message.id}"
     )
-
-    # =====================================================
-    # CONFIRMARE
-    # =====================================================
 
     await interaction.followup.send(
         "🟢 Panoul de prezență a fost creat.",
@@ -833,10 +742,6 @@ async def incheie_prezenta(
     interaction: discord.Interaction
 ):
 
-    # =====================================================
-    # ADMIN
-    # =====================================================
-
     if not interaction.user.guild_permissions.administrator:
 
         await interaction.response.send_message(
@@ -845,10 +750,6 @@ async def incheie_prezenta(
         )
 
         return
-
-    # =====================================================
-    # VERIFICĂM SESIUNEA
-    # =====================================================
 
     if not is_session_active():
 
@@ -863,18 +764,10 @@ async def incheie_prezenta(
         ephemeral=True
     )
 
-    # =====================================================
-    # OPRIM SESIUNEA
-    # =====================================================
-
     set_setting(
         "session_active",
         "0"
     )
-
-    # =====================================================
-    # ACTUALIZĂM PANELUL
-    # =====================================================
 
     try:
 
@@ -917,10 +810,6 @@ async def incheie_prezenta(
             f"Eroare la închiderea panoului: {e}"
         )
 
-    # =====================================================
-    # CONFIRMARE
-    # =====================================================
-
     await interaction.followup.send(
         "🔴 Prezența a fost încheiată.",
         ephemeral=True
@@ -942,10 +831,6 @@ async def prezenta(
     interaction: discord.Interaction
 ):
 
-    # =====================================================
-    # VERIFICĂM SESIUNEA
-    # =====================================================
-
     if not is_session_active():
 
         await interaction.response.send_message(
@@ -958,10 +843,6 @@ async def prezenta(
     session_id = (
         get_current_session_id()
     )
-
-    # =====================================================
-    # DATABASE
-    # =====================================================
 
     conn = get_db()
     cur = conn.cursor()
@@ -980,10 +861,6 @@ async def prezenta(
 
     conn.close()
 
-    # =====================================================
-    # NU ESTE PREZENT
-    # =====================================================
-
     if not row:
 
         await interaction.response.send_message(
@@ -992,10 +869,6 @@ async def prezenta(
         )
 
         return
-
-    # =====================================================
-    # ESTE PREZENT
-    # =====================================================
 
     await interaction.response.send_message(
         (
@@ -1025,17 +898,9 @@ async def on_ready():
         f"Database: {DB_FILE}"
     )
 
-    # =====================================================
-    # VIEW PERSISTENT
-    # =====================================================
-
     bot.add_view(
         PresenceView()
     )
-
-    # =====================================================
-    # SLASH COMMANDS
-    # =====================================================
 
     try:
 
@@ -1059,4 +924,3 @@ async def on_ready():
 init_db()
 
 bot.run(TOKEN)
-````
