@@ -61,6 +61,134 @@ def get_db():
     return conn
 
 
+def migrate_database(conn):
+    """
+    Verifică structura bazei de date existente.
+    Dacă tabelul settings este din versiunea veche,
+    îl reconstruiește cu structura nouă.
+    """
+
+    cur = conn.cursor()
+
+    # -----------------------------------------------------
+    # Verificăm dacă settings există
+    # -----------------------------------------------------
+
+    cur.execute("""
+        SELECT name
+        FROM sqlite_master
+        WHERE type = 'table'
+          AND name = 'settings'
+    """)
+
+    settings_exists = cur.fetchone()
+
+    if settings_exists:
+
+        cur.execute(
+            "PRAGMA table_info(settings)"
+        )
+
+        columns = cur.fetchall()
+
+        column_names = [
+            column["name"]
+            for column in columns
+        ]
+
+        # -------------------------------------------------
+        # Dacă nu există coloana "key", este baza veche
+        # -------------------------------------------------
+
+        if "key" not in column_names:
+
+            print(
+                "Baza de date veche a fost detectată."
+            )
+
+            print(
+                "Se reconstruiește tabelul settings..."
+            )
+
+            # Facem backup al tabelului vechi
+            cur.execute("""
+                ALTER TABLE settings
+                RENAME TO settings_old
+            """)
+
+            # Creăm tabelul nou
+            cur.execute("""
+                CREATE TABLE settings (
+                    key TEXT PRIMARY KEY,
+                    value TEXT
+                )
+            """)
+
+            # Încercăm să recuperăm datele utile
+            cur.execute("""
+                PRAGMA table_info(settings_old)
+            """)
+
+            old_columns = cur.fetchall()
+
+            old_column_names = [
+                column["name"]
+                for column in old_columns
+            ]
+
+            # -------------------------------------------------
+            # Dacă vechea bază avea name/value
+            # -------------------------------------------------
+
+            if (
+                "name" in old_column_names
+                and "value" in old_column_names
+            ):
+
+                cur.execute("""
+                    INSERT OR IGNORE INTO settings (
+                        key,
+                        value
+                    )
+                    SELECT
+                        name,
+                        value
+                    FROM settings_old
+                """)
+
+            # -------------------------------------------------
+            # Dacă vechea bază avea setting/value
+            # -------------------------------------------------
+
+            elif (
+                "setting" in old_column_names
+                and "value" in old_column_names
+            ):
+
+                cur.execute("""
+                    INSERT OR IGNORE INTO settings (
+                        key,
+                        value
+                    )
+                    SELECT
+                        setting,
+                        value
+                    FROM settings_old
+                """)
+
+            # -------------------------------------------------
+            # Ștergem tabelul vechi
+            # -------------------------------------------------
+
+            cur.execute("""
+                DROP TABLE settings_old
+            """)
+
+            print(
+                "Tabelul settings a fost migrat."
+            )
+
+
 def init_db():
 
     conn = get_db()
@@ -83,6 +211,12 @@ def init_db():
     """)
 
     # =====================================================
+    # MIGRARE DATABASE
+    # =====================================================
+
+    migrate_database(conn)
+
+    # =====================================================
     # SETĂRI
     # =====================================================
 
@@ -94,27 +228,55 @@ def init_db():
     """)
 
     cur.execute("""
-        INSERT OR IGNORE INTO settings (key, value)
-        VALUES ('session_id', '0')
+        INSERT OR IGNORE INTO settings (
+            key,
+            value
+        )
+        VALUES (
+            'session_id',
+            '0'
+        )
     """)
 
     cur.execute("""
-        INSERT OR IGNORE INTO settings (key, value)
-        VALUES ('session_active', '0')
+        INSERT OR IGNORE INTO settings (
+            key,
+            value
+        )
+        VALUES (
+            'session_active',
+            '0'
+        )
     """)
 
     cur.execute("""
-        INSERT OR IGNORE INTO settings (key, value)
-        VALUES ('panel_channel_id', '')
+        INSERT OR IGNORE INTO settings (
+            key,
+            value
+        )
+        VALUES (
+            'panel_channel_id',
+            ''
+        )
     """)
 
     cur.execute("""
-        INSERT OR IGNORE INTO settings (key, value)
-        VALUES ('panel_message_id', '')
+        INSERT OR IGNORE INTO settings (
+            key,
+            value
+        )
+        VALUES (
+            'panel_message_id',
+            ''
+        )
     """)
 
     conn.commit()
     conn.close()
+
+    print(
+        "Database inițializată cu succes."
+    )
 
 
 def get_setting(key, default=None):
@@ -143,8 +305,14 @@ def set_setting(key, value):
     cur = conn.cursor()
 
     cur.execute("""
-        INSERT INTO settings (key, value)
-        VALUES (?, ?)
+        INSERT INTO settings (
+            key,
+            value
+        )
+        VALUES (
+            ?,
+            ?
+        )
         ON CONFLICT(key)
         DO UPDATE SET value = excluded.value
     """, (
@@ -231,10 +399,6 @@ def create_panel_embed(
     session_finished=False
 ):
 
-    # =====================================================
-    # HEADER
-    # =====================================================
-
     if session_finished:
 
         embed = discord.Embed(
@@ -256,10 +420,6 @@ def create_panel_embed(
             ),
             color=discord.Color.green()
         )
-
-    # =====================================================
-    # PERSOANE PREZENTE
-    # =====================================================
 
     users = get_present_users()
 
@@ -332,10 +492,6 @@ def create_panel_embed(
                 ),
                 inline=False
             )
-
-    # =====================================================
-    # FOOTER
-    # =====================================================
 
     if session_finished:
 
