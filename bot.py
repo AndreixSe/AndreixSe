@@ -19,14 +19,13 @@ TOKEN = os.getenv("DISCORD_TOKEN")
 TIMEZONE_NAME = os.getenv("TIMEZONE", "Europe/Bucharest")
 
 if not TOKEN:
-    raise RuntimeError(
-        "DISCORD_TOKEN lipsește din variabilele de mediu."
-    )
+    raise RuntimeError("DISCORD_TOKEN lipsește din variabilele de mediu.")
 
 try:
     TZ = ZoneInfo(TIMEZONE_NAME)
 except Exception:
     TZ = ZoneInfo("Europe/Bucharest")
+
 
 # Railway Volume
 if os.path.isdir("/data"):
@@ -180,10 +179,14 @@ def format_datetime(value):
         return value
 
 
-def format_duration(started_at):
+def format_duration(started_at, end_time=None):
     try:
         start = datetime.fromisoformat(started_at)
-        end = now_local()
+
+        if end_time is None:
+            end = now_local()
+        else:
+            end = end_time
 
         seconds = int((end - start).total_seconds())
 
@@ -204,33 +207,38 @@ def format_duration(started_at):
 # PANEL
 # =========================================================
 
-def create_panel_embed():
-    embed = discord.Embed(
-        title="🟢 PREZENȚĂ",
-        description=(
-            "Apasă butonul **🟢 PREZENT** pentru a fi trecut "
-            "direct pe lista de prezenți.\n\n"
-            "### 👥 Persoane prezente"
-        ),
-        color=discord.Color.green()
-    )
+def create_panel_embed(session_finished=False):
+    if session_finished:
+        embed = discord.Embed(
+            title="🔴 PREZENȚĂ",
+            description="Sesiunea de prezență este încheiată.",
+            color=discord.Color.red()
+        )
+    else:
+        embed = discord.Embed(
+            title="🟢 PREZENȚĂ",
+            description=(
+                "Apasă butonul **🟢 PREZENT** pentru a fi trecut "
+                "direct pe lista de prezenți."
+            ),
+            color=discord.Color.green()
+        )
 
     users = get_present_users()
 
     if not users:
         embed.add_field(
-            name="Nimeni nu este prezent",
-            value="Apasă **🟢 PREZENT** pentru a te trece pe listă.",
+            name="👥 Persoane prezente",
+            value="Nimeni nu este prezent.",
             inline=False
         )
+
     else:
         lines = []
 
         for index, user in enumerate(users, start=1):
-            name = user["display_name"]
-
             lines.append(
-                f"**{index}. {name}**\n"
+                f"**{index}. {user['display_name']}**\n"
                 f"🕐 {format_datetime(user['started_at'])}"
             )
 
@@ -241,72 +249,10 @@ def create_panel_embed():
         )
 
     embed.set_footer(
-        text="Lista se actualizează automat când cineva apasă PREZENT."
+        text="Lista se actualizează automat."
     )
 
     return embed
-
-
-# =========================================================
-# PANEL CU AVATARURI
-# =========================================================
-
-async def update_panel():
-    channel_id = get_setting("panel_channel_id", "")
-    message_id = get_setting("panel_message_id", "")
-
-    if not channel_id or not message_id:
-        return
-
-    try:
-        channel = bot.get_channel(int(channel_id))
-
-        if channel is None:
-            channel = await bot.fetch_channel(int(channel_id))
-
-        message = await channel.fetch_message(int(message_id))
-
-        # Embed principal
-        embeds = [create_panel_embed()]
-
-        # Un embed pentru fiecare persoană,
-        # astfel încât fiecare avatar să apară direct în panou.
-        users = get_present_users()
-
-        for user in users:
-            avatar_url = user["avatar_url"]
-
-            person_embed = discord.Embed(
-                description=(
-                    f"**{user['display_name']}**\n"
-                    f"🕐 Prezent de la "
-                    f"`{format_datetime(user['started_at'])}`\n"
-                    f"⏱️ Durată: `{format_duration(user['started_at'])}`"
-                ),
-                color=discord.Color.green()
-            )
-
-            if avatar_url:
-                person_embed.set_thumbnail(url=avatar_url)
-
-            embeds.append(person_embed)
-
-        # Discord permite maximum 10 embed-uri într-un mesaj.
-        # Dacă sunt mai mult de 9 persoane, păstrăm lista principală
-        # și avatarurile primelor 9.
-        embeds = embeds[:10]
-
-        await message.edit(
-            content=None,
-            embeds=embeds,
-            view=PresenceView()
-        )
-
-    except discord.NotFound:
-        print("Panoul nu mai există în Discord.")
-
-    except Exception as e:
-        print(f"Eroare la actualizarea panoului: {e}")
 
 
 # =========================================================
@@ -332,9 +278,6 @@ class PresenceView(discord.ui.View):
 
         # Nu există sesiune activă
         if not is_session_active():
-
-            # Răspuns invizibil / ephemeral.
-            # Nu apare mesaj public în canal.
             await interaction.response.send_message(
                 "Momentan nu există o sesiune de prezență activă.",
                 ephemeral=True
@@ -365,7 +308,7 @@ class PresenceView(discord.ui.View):
         if existing:
             conn.close()
 
-            # Nu afișăm nimic public.
+            # Fără mesaj public
             await interaction.response.defer(ephemeral=True)
             return
 
@@ -391,11 +334,73 @@ class PresenceView(discord.ui.View):
         conn.commit()
         conn.close()
 
-        # Răspuns invizibil pentru Discord.
+        # Răspuns invizibil
         await interaction.response.defer(ephemeral=True)
 
-        # Actualizăm direct panoul
+        # Actualizăm panoul
         await update_panel()
+
+
+# =========================================================
+# ACTUALIZARE PANEL
+# =========================================================
+
+async def update_panel():
+
+    channel_id = get_setting("panel_channel_id", "")
+    message_id = get_setting("panel_message_id", "")
+
+    if not channel_id or not message_id:
+        return
+
+    try:
+        channel = bot.get_channel(int(channel_id))
+
+        if channel is None:
+            channel = await bot.fetch_channel(int(channel_id))
+
+        message = await channel.fetch_message(int(message_id))
+
+        users = get_present_users()
+
+        # Embed principal
+        embeds = [create_panel_embed()]
+
+        # Avatarurile persoanelor
+        for user in users:
+
+            person_embed = discord.Embed(
+                description=(
+                    f"**{user['display_name']}**\n"
+                    f"🕐 Prezent de la "
+                    f"`{format_datetime(user['started_at'])}`\n"
+                    f"⏱️ Durată: "
+                    f"`{format_duration(user['started_at'])}`"
+                ),
+                color=discord.Color.green()
+            )
+
+            if user["avatar_url"]:
+                person_embed.set_thumbnail(
+                    url=user["avatar_url"]
+                )
+
+            embeds.append(person_embed)
+
+        # Discord permite maximum 10 embed-uri
+        embeds = embeds[:10]
+
+        await message.edit(
+            content=None,
+            embeds=embeds,
+            view=PresenceView()
+        )
+
+    except discord.NotFound:
+        print("Panoul nu mai există în Discord.")
+
+    except Exception as e:
+        print(f"Eroare la actualizarea panoului: {e}")
 
 
 # =========================================================
@@ -416,17 +421,47 @@ async def setup_prezenta(interaction: discord.Interaction):
         )
         return
 
-    # Răspuns invizibil
     await interaction.response.defer(ephemeral=True)
 
-    # Pornim o sesiune nouă
+    # =====================================================
+    # ȘTERGEM VECHIUL PANEL
+    # =====================================================
+
+    old_channel_id = get_setting("panel_channel_id", "")
+    old_message_id = get_setting("panel_message_id", "")
+
+    if old_channel_id and old_message_id:
+
+        try:
+            old_channel = bot.get_channel(int(old_channel_id))
+
+            if old_channel is None:
+                old_channel = await bot.fetch_channel(
+                    int(old_channel_id)
+                )
+
+            old_message = await old_channel.fetch_message(
+                int(old_message_id)
+            )
+
+            await old_message.delete()
+
+            print("Panoul vechi a fost șters.")
+
+        except Exception as e:
+            print(f"Nu am putut șterge panoul vechi: {e}")
+
+    # =====================================================
+    # SESIUNE NOUĂ
+    # =====================================================
+
     old_session = get_current_session_id()
     new_session = old_session + 1
 
     set_setting("session_id", new_session)
     set_setting("session_active", "1")
 
-    # Ștergem eventualele date rămase din sesiunea nouă
+    # Ștergem datele sesiunii noi dacă există
     conn = get_db()
     cur = conn.cursor()
 
@@ -438,14 +473,16 @@ async def setup_prezenta(interaction: discord.Interaction):
     conn.commit()
     conn.close()
 
-    # Canalul unde se execută comanda
+    # =====================================================
+    # CREĂM PANoul NOU
+    # =====================================================
+
     channel = interaction.channel
 
-    # Creăm panoul
     embed = create_panel_embed()
 
     message = await channel.send(
-        embeds=[embed],
+        embed=embed,
         view=PresenceView()
     )
 
@@ -456,6 +493,11 @@ async def setup_prezenta(interaction: discord.Interaction):
         f"Sesiune nouă de prezență: {new_session} "
         f"| Canal: {channel.id} "
         f"| Mesaj: {message.id}"
+    )
+
+    await interaction.followup.send(
+        "Panoul de prezență a fost creat.",
+        ephemeral=True
     )
 
 
@@ -488,6 +530,9 @@ async def incheie_prezenta(interaction: discord.Interaction):
 
     users = get_present_users()
 
+    # Fixăm momentul exact al încheierii
+    end_time = now_local()
+
     # Oprim sesiunea
     set_setting("session_active", "0")
 
@@ -499,13 +544,15 @@ async def incheie_prezenta(interaction: discord.Interaction):
         title="📋 RAPORT PREZENȚĂ",
         description=(
             f"Sesiunea **#{get_current_session_id()}** "
-            f"a fost încheiată."
+            f"a fost încheiată.\n\n"
+            f"🕐 Încheiată la: "
+            f"`{end_time.strftime('%d.%m.%Y %H:%M:%S')}`"
         ),
-        color=discord.Color.blue(),
-        timestamp=now_local()
+        color=discord.Color.blue()
     )
 
     if not users:
+
         report_embed.add_field(
             name="👥 Prezenți",
             value="Nicio persoană nu a fost prezentă.",
@@ -513,9 +560,31 @@ async def incheie_prezenta(interaction: discord.Interaction):
         )
 
     else:
+
         report_embed.add_field(
             name="👥 Total persoane prezente",
             value=f"**{len(users)}**",
+            inline=False
+        )
+
+        lines = []
+
+        for index, user in enumerate(users, start=1):
+
+            duration = format_duration(
+                user["started_at"],
+                end_time
+            )
+
+            lines.append(
+                f"**{index}. {user['display_name']}**\n"
+                f"🟢 De la: `{format_datetime(user['started_at'])}`\n"
+                f"⏱️ Durată: `{duration}`"
+            )
+
+        report_embed.add_field(
+            name="📋 Detalii",
+            value="\n\n".join(lines),
             inline=False
         )
 
@@ -523,48 +592,41 @@ async def incheie_prezenta(interaction: discord.Interaction):
         text="Raport generat de bot."
     )
 
-    # Trimitem raportul în canalul în care a fost dată comanda
-    await interaction.channel.send(
+    # Trimitem raportul
+    report_message = await interaction.channel.send(
         embed=report_embed
     )
 
-    # Un embed separat pentru fiecare persoană
-    for user in users:
+    # =====================================================
+    # PANoul RĂMÂNE
+    # =====================================================
 
-        person_embed = discord.Embed(
-            title=f"👤 {user['display_name']}",
-            color=discord.Color.green()
-        )
+    try:
 
-        person_embed.add_field(
-            name="🟢 Prezent de la",
-            value=format_datetime(user["started_at"]),
-            inline=False
-        )
+        channel_id = get_setting("panel_channel_id", "")
+        message_id = get_setting("panel_message_id", "")
 
-        person_embed.add_field(
-            name="⏱️ Durată",
-            value=format_duration(user["started_at"]),
-            inline=False
-        )
+        if channel_id and message_id:
 
-        if user["avatar_url"]:
-            person_embed.set_thumbnail(
-                url=user["avatar_url"]
+            channel = bot.get_channel(int(channel_id))
+
+            if channel is None:
+                channel = await bot.fetch_channel(
+                    int(channel_id)
+                )
+
+            panel_message = await channel.fetch_message(
+                int(message_id)
             )
 
-        await interaction.channel.send(
-            embed=person_embed
-        )
+            await panel_message.edit(
+                embeds=[create_panel_embed(session_finished=True)],
+                view=None
+            )
 
-    # =====================================================
-    # PĂSTRĂM PANoul
-    # =====================================================
+    except Exception as e:
+        print(f"Eroare la închiderea panoului: {e}")
 
-    # Actualizăm panoul astfel încât să arate că sesiunea s-a terminat.
-    await update_panel()
-
-    # Răspuns invizibil pentru administrator
     await interaction.followup.send(
         "Prezența a fost încheiată și raportul a fost generat.",
         ephemeral=True
@@ -600,10 +662,12 @@ async def prezenta(interaction: discord.Interaction):
     conn.close()
 
     if not row:
+
         await interaction.response.send_message(
             "❌ Nu ești trecut prezent.",
             ephemeral=True
         )
+
         return
 
     await interaction.response.send_message(
@@ -627,14 +691,22 @@ async def on_ready():
     print(f"Timezone: {TIMEZONE_NAME}")
     print(f"Database: {DB_FILE}")
 
-    # Persistent button
+    # Buton persistent
     bot.add_view(PresenceView())
 
     try:
+
         synced = await bot.tree.sync()
-        print(f"Comenzi sincronizate: {len(synced)}")
+
+        print(
+            f"Comenzi sincronizate: {len(synced)}"
+        )
+
     except Exception as e:
-        print(f"Eroare la sincronizarea comenzilor: {e}")
+
+        print(
+            f"Eroare la sincronizarea comenzilor: {e}"
+        )
 
 
 # =========================================================
