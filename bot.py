@@ -1,16 +1,16 @@
 import os
 import sqlite3
-from datetime import datetime, timezone
+from datetime import datetime
 from zoneinfo import ZoneInfo
 
 import discord
 from discord import app_commands
-from discord.ext import commands, tasks
+from discord.ext import commands
 from dotenv import load_dotenv
 
 
 # =========================================================
-# CONFIG
+# CONFIGURARE
 # =========================================================
 
 load_dotenv()
@@ -28,8 +28,7 @@ try:
 except Exception:
     TZ = ZoneInfo("Europe/Bucharest")
 
-# Railway Volume -> /data
-# Local -> folderul proiectului
+# Railway Volume
 if os.path.isdir("/data"):
     DB_FILE = "/data/pontaj.db"
 else:
@@ -37,7 +36,7 @@ else:
 
 
 # =========================================================
-# DISCORD
+# BOT
 # =========================================================
 
 intents = discord.Intents.default()
@@ -65,598 +64,253 @@ def init_db():
     cur.execute("""
         CREATE TABLE IF NOT EXISTS attendance (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
+            session_id INTEGER NOT NULL,
             user_id INTEGER NOT NULL,
-            guild_id INTEGER NOT NULL,
-            display_name TEXT,
+            display_name TEXT NOT NULL,
             avatar_url TEXT,
-            work_start TEXT,
-            work_end TEXT,
-            total_break_seconds INTEGER DEFAULT 0,
-            current_break_start TEXT,
-            created_at TEXT NOT NULL
+            started_at TEXT NOT NULL,
+            UNIQUE(session_id, user_id)
         )
     """)
 
     cur.execute("""
         CREATE TABLE IF NOT EXISTS settings (
-            guild_id INTEGER PRIMARY KEY,
-            report_channel_id INTEGER
+            key TEXT PRIMARY KEY,
+            value TEXT
         )
     """)
 
-    # Compatibilitate cu o bază de date mai veche
-    columns = {
-        row["name"]
-        for row in cur.execute("PRAGMA table_info(attendance)").fetchall()
-    }
+    cur.execute("""
+        INSERT OR IGNORE INTO settings (key, value)
+        VALUES ('session_id', '0')
+    """)
 
-    if "display_name" not in columns:
-        cur.execute(
-            "ALTER TABLE attendance ADD COLUMN display_name TEXT"
-        )
+    cur.execute("""
+        INSERT OR IGNORE INTO settings (key, value)
+        VALUES ('session_active', '0')
+    """)
 
-    if "avatar_url" not in columns:
-        cur.execute(
-            "ALTER TABLE attendance ADD COLUMN avatar_url TEXT"
-        )
+    cur.execute("""
+        INSERT OR IGNORE INTO settings (key, value)
+        VALUES ('panel_channel_id', '')
+    """)
 
-    if "current_break_start" not in columns:
-        cur.execute(
-            "ALTER TABLE attendance ADD COLUMN current_break_start TEXT"
-        )
+    cur.execute("""
+        INSERT OR IGNORE INTO settings (key, value)
+        VALUES ('panel_message_id', '')
+    """)
 
     conn.commit()
     conn.close()
 
 
+def get_setting(key, default=None):
+    conn = get_db()
+    cur = conn.cursor()
+
+    cur.execute(
+        "SELECT value FROM settings WHERE key = ?",
+        (key,)
+    )
+
+    row = cur.fetchone()
+    conn.close()
+
+    if row is None:
+        return default
+
+    return row["value"]
+
+
+def set_setting(key, value):
+    conn = get_db()
+    cur = conn.cursor()
+
+    cur.execute("""
+        INSERT INTO settings (key, value)
+        VALUES (?, ?)
+        ON CONFLICT(key)
+        DO UPDATE SET value = excluded.value
+    """, (key, str(value)))
+
+    conn.commit()
+    conn.close()
+
+
+def get_current_session_id():
+    return int(get_setting("session_id", "0"))
+
+
+def is_session_active():
+    return get_setting("session_active", "0") == "1"
+
+
+def get_present_users():
+    session_id = get_current_session_id()
+
+    conn = get_db()
+    cur = conn.cursor()
+
+    cur.execute("""
+        SELECT *
+        FROM attendance
+        WHERE session_id = ?
+        ORDER BY started_at ASC
+    """, (session_id,))
+
+    rows = cur.fetchall()
+    conn.close()
+
+    return rows
+
+
 # =========================================================
-# TIME HELPERS
+# TIMP
 # =========================================================
 
 def now_local():
     return datetime.now(TZ)
 
 
-def dt_to_str(dt):
-    return dt.astimezone(timezone.utc).isoformat()
+def format_datetime(value):
+    try:
+        dt = datetime.fromisoformat(value)
+        return dt.astimezone(TZ).strftime("%d.%m.%Y %H:%M:%S")
+    except Exception:
+        return value
 
 
-def str_to_dt(value):
-    if not value:
-        return None
+def format_duration(started_at):
+    try:
+        start = datetime.fromisoformat(started_at)
+        end = now_local()
 
-    return datetime.fromisoformat(value)
+        seconds = int((end - start).total_seconds())
 
+        if seconds < 0:
+            seconds = 0
 
-def format_duration(seconds):
-    seconds = max(0, int(seconds))
+        hours = seconds // 3600
+        minutes = (seconds % 3600) // 60
+        secs = seconds % 60
 
-    hours = seconds // 3600
-    minutes = (seconds % 3600) // 60
-    secs = seconds % 60
-
-    if hours:
         return f"{hours}h {minutes}m {secs}s"
 
-    if minutes:
-        return f"{minutes}m {secs}s"
-
-    return f"{secs}s"
-
-
-# =========================================================
-# USER / ATTENDANCE HELPERS
-# =========================================================
-
-def get_active_attendance(guild_id, user_id):
-    conn = get_db()
-
-    row = conn.execute("""
-        SELECT *
-        FROM attendance
-        WHERE guild_id = ?
-          AND user_id = ?
-          AND work_end IS NULL
-        ORDER BY id DESC
-        LIMIT 1
-    """, (guild_id, user_id)).fetchone()
-
-    conn.close()
-    return row
-
-
-def get_today_records(guild_id):
-    today = now_local().date()
-
-    conn = get_db()
-
-    rows = conn.execute("""
-        SELECT *
-        FROM attendance
-        WHERE guild_id = ?
-        ORDER BY id ASC
-    """, (guild_id,)).fetchall()
-
-    conn.close()
-
-    result = []
-
-    for row in rows:
-        created = row["created_at"]
-
-        try:
-            created_dt = str_to_dt(created).astimezone(TZ)
-        except Exception:
-            continue
-
-        if created_dt.date() == today:
-            result.append(row)
-
-    return result
-
-
-def save_user_info(guild, user):
-    display_name = getattr(user, "display_name", user.name)
-
-    avatar_url = None
-
-    try:
-        if user.display_avatar:
-            avatar_url = str(user.display_avatar.url)
     except Exception:
-        pass
-
-    return display_name, avatar_url
+        return "-"
 
 
 # =========================================================
-# STATUS ACTIONS
+# PANEL
 # =========================================================
 
-def start_work(guild, user):
-    existing = get_active_attendance(guild.id, user.id)
-
-    if existing:
-        return False, "Ești deja în program."
-
-    display_name, avatar_url = save_user_info(guild, user)
-
-    now = now_local()
-
-    conn = get_db()
-
-    conn.execute("""
-        INSERT INTO attendance (
-            user_id,
-            guild_id,
-            display_name,
-            avatar_url,
-            work_start,
-            work_end,
-            total_break_seconds,
-            current_break_start,
-            created_at
-        )
-        VALUES (?, ?, ?, ?, ?, NULL, 0, NULL, ?)
-    """, (
-        user.id,
-        guild.id,
-        display_name,
-        avatar_url,
-        dt_to_str(now),
-        dt_to_str(now),
-    ))
-
-    conn.commit()
-    conn.close()
-
-    return True, f"Program început la **{now.strftime('%H:%M:%S')}**."
-
-
-def start_break(guild, user):
-    row = get_active_attendance(guild.id, user.id)
-
-    if not row:
-        return False, "Nu ești în program."
-
-    if row["current_break_start"]:
-        return False, "Ești deja în pauză."
-
-    now = now_local()
-
-    conn = get_db()
-
-    conn.execute("""
-        UPDATE attendance
-        SET current_break_start = ?
-        WHERE id = ?
-    """, (
-        dt_to_str(now),
-        row["id"],
-    ))
-
-    conn.commit()
-    conn.close()
-
-    return True, f"Pauză începută la **{now.strftime('%H:%M:%S')}**."
-
-
-def resume_work(guild, user):
-    row = get_active_attendance(guild.id, user.id)
-
-    if not row:
-        return False, "Nu ești în program."
-
-    if not row["current_break_start"]:
-        return False, "Nu ești în pauză."
-
-    now = now_local()
-    break_start = str_to_dt(row["current_break_start"])
-
-    break_seconds = int(
-        (now.astimezone(timezone.utc)
-         - break_start.astimezone(timezone.utc)).total_seconds()
-    )
-
-    total_break = (row["total_break_seconds"] or 0) + break_seconds
-
-    conn = get_db()
-
-    conn.execute("""
-        UPDATE attendance
-        SET total_break_seconds = ?,
-            current_break_start = NULL
-        WHERE id = ?
-    """, (
-        total_break,
-        row["id"],
-    ))
-
-    conn.commit()
-    conn.close()
-
-    return True, (
-        f"Ai revenit din pauză. "
-        f"Pauza a durat **{format_duration(break_seconds)}**."
-    )
-
-
-def end_work(guild, user):
-    row = get_active_attendance(guild.id, user.id)
-
-    if not row:
-        return False, "Nu ești în program."
-
-    if row["current_break_start"]:
-        return False, "Ești în pauză. Apasă mai întâi **▶️ Reia programul**."
-
-    now = now_local()
-
-    work_start = str_to_dt(row["work_start"])
-
-    total_elapsed = int(
-        (
-            now.astimezone(timezone.utc)
-            - work_start.astimezone(timezone.utc)
-        ).total_seconds()
-    )
-
-    worked_seconds = max(
-        0,
-        total_elapsed - (row["total_break_seconds"] or 0)
-    )
-
-    conn = get_db()
-
-    conn.execute("""
-        UPDATE attendance
-        SET work_end = ?
-        WHERE id = ?
-    """, (
-        dt_to_str(now),
-        row["id"],
-    ))
-
-    conn.commit()
-    conn.close()
-
-    return True, (
-        f"Program încheiat la **{now.strftime('%H:%M:%S')}**.\n"
-        f"Timp lucrat: **{format_duration(worked_seconds)}**."
-    )
-
-
-# =========================================================
-# REPORT CHANNEL
-# =========================================================
-
-def set_report_channel(guild_id, channel_id):
-    conn = get_db()
-
-    conn.execute("""
-        INSERT INTO settings (guild_id, report_channel_id)
-        VALUES (?, ?)
-        ON CONFLICT(guild_id)
-        DO UPDATE SET report_channel_id = excluded.report_channel_id
-    """, (
-        guild_id,
-        channel_id,
-    ))
-
-    conn.commit()
-    conn.close()
-
-
-def get_report_channel_id(guild_id):
-    conn = get_db()
-
-    row = conn.execute("""
-        SELECT report_channel_id
-        FROM settings
-        WHERE guild_id = ?
-    """, (guild_id,)).fetchone()
-
-    conn.close()
-
-    if not row:
-        return None
-
-    return row["report_channel_id"]
-
-
-# =========================================================
-# REPORT
-# =========================================================
-
-async def send_daily_report(guild):
-    records = get_today_records(guild.id)
-
-    if not records:
-        return
-
-    channel_id = get_report_channel_id(guild.id)
-
-    if not channel_id:
-        return
-
-    channel = guild.get_channel(channel_id)
-
-    if channel is None:
-        try:
-            channel = await guild.fetch_channel(channel_id)
-        except Exception:
-            return
-
-    if not isinstance(channel, discord.TextChannel):
-        return
-
-    # Main embed
-    report_embed = discord.Embed(
-        title="📋 Raport pontaj",
+def create_panel_embed():
+    embed = discord.Embed(
+        title="🟢 PREZENȚĂ",
         description=(
-            f"Raport pentru **{now_local().strftime('%d.%m.%Y')}**"
+            "Apasă butonul **🟢 PREZENT** pentru a fi trecut "
+            "direct pe lista de prezenți.\n\n"
+            "### 👥 Persoane prezente"
         ),
-        color=discord.Color.blue(),
-        timestamp=now_local(),
+        color=discord.Color.green()
     )
 
-    total_worked = 0
-    total_people = 0
+    users = get_present_users()
 
-    for row in records:
-        start = str_to_dt(row["work_start"])
-        end = str_to_dt(row["work_end"])
-
-        if not start:
-            continue
-
-        if end:
-            end_dt = end
-        else:
-            end_dt = now_local()
-
-        elapsed = int(
-            (
-                end_dt.astimezone(timezone.utc)
-                - start.astimezone(timezone.utc)
-            ).total_seconds()
-        )
-
-        # Dacă persoana este încă în pauză la momentul raportului,
-        # calculăm și pauza curentă.
-        total_break = row["total_break_seconds"] or 0
-
-        if row["current_break_start"]:
-            current_break = str_to_dt(row["current_break_start"])
-
-            if current_break:
-                total_break += int(
-                    (
-                        end_dt.astimezone(timezone.utc)
-                        - current_break.astimezone(timezone.utc)
-                    ).total_seconds()
-                )
-
-        worked = max(0, elapsed - total_break)
-
-        total_worked += worked
-        total_people += 1
-
-        name = row["display_name"] or f"User {row['user_id']}"
-
-        report_embed.add_field(
-            name=name,
-            value=f"⏱️ {format_duration(worked)}",
-            inline=False,
-        )
-
-    report_embed.add_field(
-        name="👥 Persoane",
-        value=str(total_people),
-        inline=True,
-    )
-
-    report_embed.add_field(
-        name="⏱️ Total lucrat",
-        value=format_duration(total_worked),
-        inline=True,
-    )
-
-    await channel.send(embed=report_embed)
-
-    # Detalii individuale
-    for row in records:
-        start = str_to_dt(row["work_start"])
-
-        if not start:
-            continue
-
-        end = str_to_dt(row["work_end"])
-        end_dt = end if end else now_local()
-
-        elapsed = int(
-            (
-                end_dt.astimezone(timezone.utc)
-                - start.astimezone(timezone.utc)
-            ).total_seconds()
-        )
-
-        total_break = row["total_break_seconds"] or 0
-
-        if row["current_break_start"]:
-            current_break = str_to_dt(row["current_break_start"])
-
-            if current_break:
-                total_break += int(
-                    (
-                        end_dt.astimezone(timezone.utc)
-                        - current_break.astimezone(timezone.utc)
-                    ).total_seconds()
-                )
-
-        worked = max(0, elapsed - total_break)
-
-        name = row["display_name"] or f"User {row['user_id']}"
-
-        avatar_url = row["avatar_url"]
-
-        # Încercăm să actualizăm informațiile din Discord
-        member = guild.get_member(row["user_id"])
-
-        if member:
-            name = member.display_name
-
-            try:
-                avatar_url = str(member.display_avatar.url)
-            except Exception:
-                pass
-
-        if not member:
-            try:
-                member = await guild.fetch_member(row["user_id"])
-
-                name = member.display_name
-
-                try:
-                    avatar_url = str(member.display_avatar.url)
-                except Exception:
-                    pass
-
-            except Exception:
-                pass
-
-        if not member:
-            try:
-                user = await bot.fetch_user(row["user_id"])
-
-                name = getattr(user, "display_name", user.name)
-
-                try:
-                    avatar_url = str(user.display_avatar.url)
-                except Exception:
-                    pass
-
-            except Exception:
-                pass
-
-        embed = discord.Embed(
-            title=f"👤 {name}",
-            color=discord.Color.green(),
-        )
-
+    if not users:
         embed.add_field(
-            name="🟢 Început",
-            value=start.astimezone(TZ).strftime("%H:%M:%S"),
-            inline=True,
+            name="Nimeni nu este prezent",
+            value="Apasă **🟢 PREZENT** pentru a te trece pe listă.",
+            inline=False
         )
+    else:
+        lines = []
 
-        embed.add_field(
-            name="🔴 Sfârșit",
-            value=(
-                end.astimezone(TZ).strftime("%H:%M:%S")
-                if end
-                else "Încă activ"
-            ),
-            inline=True,
-        )
+        for index, user in enumerate(users, start=1):
+            name = user["display_name"]
 
-        embed.add_field(
-            name="☕ Pauză",
-            value=format_duration(total_break),
-            inline=True,
-        )
-
-        embed.add_field(
-            name="⏱️ Timp lucrat",
-            value=format_duration(worked),
-            inline=False,
-        )
-
-        if avatar_url:
-            embed.set_thumbnail(url=avatar_url)
-
-        await channel.send(embed=embed)
-
-    # Total final
-    total_embed = discord.Embed(
-        title="📊 TOTAL",
-        description=(
-            f"**{total_people}** persoane\n"
-            f"**{format_duration(total_worked)}** timp lucrat total"
-        ),
-        color=discord.Color.gold(),
-    )
-
-    await channel.send(embed=total_embed)
-
-
-# =========================================================
-# AUTOMATIC REPORT
-# =========================================================
-
-@tasks.loop(minutes=1)
-async def automatic_report():
-    current = now_local()
-
-    if current.hour != 23 or current.minute != 59:
-        return
-
-    for guild in bot.guilds:
-        try:
-            await send_daily_report(guild)
-        except Exception as e:
-            print(
-                f"Eroare raport automat pentru {guild.name}: {e}"
+            lines.append(
+                f"**{index}. {name}**\n"
+                f"🕐 {format_datetime(user['started_at'])}"
             )
 
+        embed.add_field(
+            name=f"👥 Prezenți: {len(users)}",
+            value="\n\n".join(lines),
+            inline=False
+        )
 
-@automatic_report.before_loop
-async def before_automatic_report():
-    await bot.wait_until_ready()
+    embed.set_footer(
+        text="Lista se actualizează automat când cineva apasă PREZENT."
+    )
+
+    return embed
 
 
 # =========================================================
-# BUTTON VIEW
+# PANEL CU AVATARURI
+# =========================================================
+
+async def update_panel():
+    channel_id = get_setting("panel_channel_id", "")
+    message_id = get_setting("panel_message_id", "")
+
+    if not channel_id or not message_id:
+        return
+
+    try:
+        channel = bot.get_channel(int(channel_id))
+
+        if channel is None:
+            channel = await bot.fetch_channel(int(channel_id))
+
+        message = await channel.fetch_message(int(message_id))
+
+        # Embed principal
+        embeds = [create_panel_embed()]
+
+        # Un embed pentru fiecare persoană,
+        # astfel încât fiecare avatar să apară direct în panou.
+        users = get_present_users()
+
+        for user in users:
+            avatar_url = user["avatar_url"]
+
+            person_embed = discord.Embed(
+                description=(
+                    f"**{user['display_name']}**\n"
+                    f"🕐 Prezent de la "
+                    f"`{format_datetime(user['started_at'])}`\n"
+                    f"⏱️ Durată: `{format_duration(user['started_at'])}`"
+                ),
+                color=discord.Color.green()
+            )
+
+            if avatar_url:
+                person_embed.set_thumbnail(url=avatar_url)
+
+            embeds.append(person_embed)
+
+        # Discord permite maximum 10 embed-uri într-un mesaj.
+        # Dacă sunt mai mult de 9 persoane, păstrăm lista principală
+        # și avatarurile primelor 9.
+        embeds = embeds[:10]
+
+        await message.edit(
+            content=None,
+            embeds=embeds,
+            view=PresenceView()
+        )
+
+    except discord.NotFound:
+        print("Panoul nu mai există în Discord.")
+
+    except Exception as e:
+        print(f"Eroare la actualizarea panoului: {e}")
+
+
+# =========================================================
+# BUTON PREZENT
 # =========================================================
 
 class PresenceView(discord.ui.View):
@@ -665,288 +319,305 @@ class PresenceView(discord.ui.View):
         super().__init__(timeout=None)
 
     @discord.ui.button(
-        label="Începe programul",
-        style=discord.ButtonStyle.success,
+        label="PREZENT",
         emoji="🟢",
-        custom_id="presence:start",
+        style=discord.ButtonStyle.success,
+        custom_id="pontaj_prezent"
     )
-    async def start_button(
+    async def prezent(
         self,
         interaction: discord.Interaction,
-        button: discord.ui.Button,
+        button: discord.ui.Button
     ):
-        if not interaction.guild:
+
+        # Nu există sesiune activă
+        if not is_session_active():
+
+            # Răspuns invizibil / ephemeral.
+            # Nu apare mesaj public în canal.
+            await interaction.response.send_message(
+                "Momentan nu există o sesiune de prezență activă.",
+                ephemeral=True
+            )
             return
 
-        success, message = start_work(
-            interaction.guild,
-            interaction.user,
-        )
+        user = interaction.user
+        session_id = get_current_session_id()
 
-        if success:
-            await interaction.response.send_message(
-                f"🟢 {message}",
-                ephemeral=True,
-            )
-        else:
-            await interaction.response.send_message(
-                f"⚠️ {message}",
-                ephemeral=True,
-            )
+        avatar_url = None
 
-    @discord.ui.button(
-        label="Începe pauza",
-        style=discord.ButtonStyle.primary,
-        emoji="☕",
-        custom_id="presence:break",
-    )
-    async def break_button(
-        self,
-        interaction: discord.Interaction,
-        button: discord.ui.Button,
-    ):
-        if not interaction.guild:
+        if user.display_avatar:
+            avatar_url = user.display_avatar.url
+
+        conn = get_db()
+        cur = conn.cursor()
+
+        # Verificăm dacă persoana este deja prezentă
+        cur.execute("""
+            SELECT id
+            FROM attendance
+            WHERE session_id = ?
+              AND user_id = ?
+        """, (session_id, user.id))
+
+        existing = cur.fetchone()
+
+        if existing:
+            conn.close()
+
+            # Nu afișăm nimic public.
+            await interaction.response.defer(ephemeral=True)
             return
 
-        success, message = start_break(
-            interaction.guild,
-            interaction.user,
-        )
+        current_time = now_local().isoformat()
 
-        if success:
-            await interaction.response.send_message(
-                f"☕ {message}",
-                ephemeral=True,
+        cur.execute("""
+            INSERT INTO attendance (
+                session_id,
+                user_id,
+                display_name,
+                avatar_url,
+                started_at
             )
-        else:
-            await interaction.response.send_message(
-                f"⚠️ {message}",
-                ephemeral=True,
-            )
+            VALUES (?, ?, ?, ?, ?)
+        """, (
+            session_id,
+            user.id,
+            user.display_name,
+            avatar_url,
+            current_time
+        ))
 
-    @discord.ui.button(
-        label="Reia programul",
-        style=discord.ButtonStyle.secondary,
-        emoji="▶️",
-        custom_id="presence:resume",
-    )
-    async def resume_button(
-        self,
-        interaction: discord.Interaction,
-        button: discord.ui.Button,
-    ):
-        if not interaction.guild:
-            return
+        conn.commit()
+        conn.close()
 
-        success, message = resume_work(
-            interaction.guild,
-            interaction.user,
-        )
+        # Răspuns invizibil pentru Discord.
+        await interaction.response.defer(ephemeral=True)
 
-        if success:
-            await interaction.response.send_message(
-                f"▶️ {message}",
-                ephemeral=True,
-            )
-        else:
-            await interaction.response.send_message(
-                f"⚠️ {message}",
-                ephemeral=True,
-            )
-
-    @discord.ui.button(
-        label="Încheie programul",
-        style=discord.ButtonStyle.danger,
-        emoji="🔴",
-        custom_id="presence:end",
-    )
-    async def end_button(
-        self,
-        interaction: discord.Interaction,
-        button: discord.ui.Button,
-    ):
-        if not interaction.guild:
-            return
-
-        success, message = end_work(
-            interaction.guild,
-            interaction.user,
-        )
-
-        if success:
-            await interaction.response.send_message(
-                f"🔴 {message}",
-                ephemeral=True,
-            )
-        else:
-            await interaction.response.send_message(
-                f"⚠️ {message}",
-                ephemeral=True,
-            )
+        # Actualizăm direct panoul
+        await update_panel()
 
 
 # =========================================================
-# SLASH COMMANDS
+# SETUP PREZENȚĂ
 # =========================================================
 
 @bot.tree.command(
     name="setup_prezenta",
-    description="Configurează panoul de pontaj în acest canal."
+    description="Creează panoul de prezență și pornește o sesiune nouă."
 )
-@app_commands.checks.has_permissions(administrator=True)
+@app_commands.default_permissions(administrator=True)
 async def setup_prezenta(interaction: discord.Interaction):
 
-    if not interaction.guild:
+    if not interaction.user.guild_permissions.administrator:
         await interaction.response.send_message(
-            "Comanda poate fi folosită doar pe un server.",
-            ephemeral=True,
+            "Nu ai permisiunea de Administrator.",
+            ephemeral=True
         )
         return
 
-    set_report_channel(
-        interaction.guild.id,
-        interaction.channel.id,
+    # Răspuns invizibil
+    await interaction.response.defer(ephemeral=True)
+
+    # Pornim o sesiune nouă
+    old_session = get_current_session_id()
+    new_session = old_session + 1
+
+    set_setting("session_id", new_session)
+    set_setting("session_active", "1")
+
+    # Ștergem eventualele date rămase din sesiunea nouă
+    conn = get_db()
+    cur = conn.cursor()
+
+    cur.execute(
+        "DELETE FROM attendance WHERE session_id = ?",
+        (new_session,)
     )
 
-    embed = discord.Embed(
-        title="📋 Pontaj",
-        description=(
-            "Folosește butoanele de mai jos pentru pontaj.\n\n"
-            "🟢 **Începe programul** — începi programul\n"
-            "☕ **Începe pauza** — începi o pauză\n"
-            "▶️ **Reia programul** — revii din pauză\n"
-            "🔴 **Încheie programul** — termini programul\n\n"
-            "Pauzele sunt scăzute din timpul total lucrat."
-        ),
-        color=discord.Color.blurple(),
+    conn.commit()
+    conn.close()
+
+    # Canalul unde se execută comanda
+    channel = interaction.channel
+
+    # Creăm panoul
+    embed = create_panel_embed()
+
+    message = await channel.send(
+        embeds=[embed],
+        view=PresenceView()
     )
 
-    await interaction.channel.send(
-        embed=embed,
-        view=PresenceView(),
+    set_setting("panel_channel_id", channel.id)
+    set_setting("panel_message_id", message.id)
+
+    print(
+        f"Sesiune nouă de prezență: {new_session} "
+        f"| Canal: {channel.id} "
+        f"| Mesaj: {message.id}"
     )
 
-    await interaction.response.send_message(
-        "✅ Panoul de pontaj a fost configurat.",
-        ephemeral=True,
-    )
 
+# =========================================================
+# ÎNCHEIE PREZENȚA
+# =========================================================
 
 @bot.tree.command(
-    name="prezenta",
-    description="Vezi statusul tău actual."
+    name="incheie_prezenta",
+    description="Încheie sesiunea de prezență și generează raportul."
 )
-async def prezenta(interaction: discord.Interaction):
+@app_commands.default_permissions(administrator=True)
+async def incheie_prezenta(interaction: discord.Interaction):
 
-    if not interaction.guild:
+    if not interaction.user.guild_permissions.administrator:
         await interaction.response.send_message(
-            "Comanda poate fi folosită doar pe un server.",
-            ephemeral=True,
+            "Nu ai permisiunea de Administrator.",
+            ephemeral=True
         )
         return
 
-    row = get_active_attendance(
-        interaction.guild.id,
-        interaction.user.id,
-    )
-
-    if not row:
+    if not is_session_active():
         await interaction.response.send_message(
-            "⚪ Nu ești în program.",
-            ephemeral=True,
-        )
-        return
-
-    start = str_to_dt(row["work_start"])
-
-    if row["current_break_start"]:
-        status = "☕ Ești în pauză."
-
-        break_start = str_to_dt(row["current_break_start"])
-
-        break_duration = int(
-            (
-                now_local().astimezone(timezone.utc)
-                - break_start.astimezone(timezone.utc)
-            ).total_seconds()
-        )
-
-        extra = (
-            f"\nPauza curentă: "
-            f"**{format_duration(break_duration)}**"
-        )
-    else:
-        status = "🟢 Ești în program."
-        extra = ""
-
-    await interaction.response.send_message(
-        f"{status}\n"
-        f"Început: **{start.astimezone(TZ).strftime('%H:%M:%S')}**"
-        f"{extra}",
-        ephemeral=True,
-    )
-
-
-@bot.tree.command(
-    name="raport",
-    description="Trimite raportul de pontaj pentru azi."
-)
-@app_commands.checks.has_permissions(administrator=True)
-async def raport(interaction: discord.Interaction):
-
-    if not interaction.guild:
-        await interaction.response.send_message(
-            "Comanda poate fi folosită doar pe un server.",
-            ephemeral=True,
+            "Nu există o sesiune de prezență activă.",
+            ephemeral=True
         )
         return
 
     await interaction.response.defer(ephemeral=True)
 
-    await send_daily_report(interaction.guild)
+    users = get_present_users()
 
+    # Oprim sesiunea
+    set_setting("session_active", "0")
+
+    # =====================================================
+    # RAPORT
+    # =====================================================
+
+    report_embed = discord.Embed(
+        title="📋 RAPORT PREZENȚĂ",
+        description=(
+            f"Sesiunea **#{get_current_session_id()}** "
+            f"a fost încheiată."
+        ),
+        color=discord.Color.blue(),
+        timestamp=now_local()
+    )
+
+    if not users:
+        report_embed.add_field(
+            name="👥 Prezenți",
+            value="Nicio persoană nu a fost prezentă.",
+            inline=False
+        )
+
+    else:
+        report_embed.add_field(
+            name="👥 Total persoane prezente",
+            value=f"**{len(users)}**",
+            inline=False
+        )
+
+    report_embed.set_footer(
+        text="Raport generat de bot."
+    )
+
+    # Trimitem raportul în canalul în care a fost dată comanda
+    await interaction.channel.send(
+        embed=report_embed
+    )
+
+    # Un embed separat pentru fiecare persoană
+    for user in users:
+
+        person_embed = discord.Embed(
+            title=f"👤 {user['display_name']}",
+            color=discord.Color.green()
+        )
+
+        person_embed.add_field(
+            name="🟢 Prezent de la",
+            value=format_datetime(user["started_at"]),
+            inline=False
+        )
+
+        person_embed.add_field(
+            name="⏱️ Durată",
+            value=format_duration(user["started_at"]),
+            inline=False
+        )
+
+        if user["avatar_url"]:
+            person_embed.set_thumbnail(
+                url=user["avatar_url"]
+            )
+
+        await interaction.channel.send(
+            embed=person_embed
+        )
+
+    # =====================================================
+    # PĂSTRĂM PANoul
+    # =====================================================
+
+    # Actualizăm panoul astfel încât să arate că sesiunea s-a terminat.
+    await update_panel()
+
+    # Răspuns invizibil pentru administrator
     await interaction.followup.send(
-        "✅ Raportul a fost trimis.",
-        ephemeral=True,
+        "Prezența a fost încheiată și raportul a fost generat.",
+        ephemeral=True
     )
 
 
 # =========================================================
-# ERROR HANDLING
+# PREZENȚA MEA
 # =========================================================
 
-@setup_prezenta.error
-async def setup_error(
-    interaction: discord.Interaction,
-    error: app_commands.AppCommandError,
-):
-    if isinstance(
-        error,
-        app_commands.errors.MissingPermissions,
-    ):
-        await interaction.response.send_message(
-            "❌ Ai nevoie de permisiunea Administrator.",
-            ephemeral=True,
-        )
+@bot.tree.command(
+    name="prezenta",
+    description="Vezi dacă ești trecut prezent în sesiunea curentă."
+)
+async def prezenta(interaction: discord.Interaction):
 
+    session_id = get_current_session_id()
 
-@raport.error
-async def raport_error(
-    interaction: discord.Interaction,
-    error: app_commands.AppCommandError,
-):
-    if isinstance(
-        error,
-        app_commands.errors.MissingPermissions,
-    ):
+    conn = get_db()
+    cur = conn.cursor()
+
+    cur.execute("""
+        SELECT *
+        FROM attendance
+        WHERE session_id = ?
+          AND user_id = ?
+    """, (
+        session_id,
+        interaction.user.id
+    ))
+
+    row = cur.fetchone()
+    conn.close()
+
+    if not row:
         await interaction.response.send_message(
-            "❌ Ai nevoie de permisiunea Administrator.",
-            ephemeral=True,
+            "❌ Nu ești trecut prezent.",
+            ephemeral=True
         )
+        return
+
+    await interaction.response.send_message(
+        (
+            "🟢 **Ești prezent.**\n"
+            f"Prezent de la: `{format_datetime(row['started_at'])}`\n"
+            f"Durată: `{format_duration(row['started_at'])}`"
+        ),
+        ephemeral=True
+    )
 
 
 # =========================================================
-# BOT EVENTS
+# READY
 # =========================================================
 
 @bot.event
@@ -956,12 +627,8 @@ async def on_ready():
     print(f"Timezone: {TIMEZONE_NAME}")
     print(f"Database: {DB_FILE}")
 
-    if not getattr(bot, "_presence_view_added", False):
-        bot.add_view(PresenceView())
-        bot._presence_view_added = True
-
-    if not automatic_report.is_running():
-        automatic_report.start()
+    # Persistent button
+    bot.add_view(PresenceView())
 
     try:
         synced = await bot.tree.sync()
