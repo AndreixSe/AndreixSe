@@ -61,18 +61,17 @@ def get_db():
     return conn
 
 
+# =========================================================
+# DATABASE MIGRATION
+# =========================================================
+
 def migrate_database(conn):
-    """
-    Verifică structura bazei de date existente.
-    Dacă tabelul settings este din versiunea veche,
-    îl reconstruiește cu structura nouă.
-    """
 
     cur = conn.cursor()
 
-    # -----------------------------------------------------
-    # Verificăm dacă settings există
-    # -----------------------------------------------------
+    # =====================================================
+    # MIGRARE SETTINGS
+    # =====================================================
 
     cur.execute("""
         SELECT name
@@ -96,27 +95,22 @@ def migrate_database(conn):
             for column in columns
         ]
 
-        # -------------------------------------------------
-        # Dacă nu există coloana "key", este baza veche
-        # -------------------------------------------------
-
+        # Dacă lipsește "key", este structura veche
         if "key" not in column_names:
 
             print(
-                "Baza de date veche a fost detectată."
+                "Baza de date veche pentru settings a fost detectată."
             )
 
             print(
                 "Se reconstruiește tabelul settings..."
             )
 
-            # Facem backup al tabelului vechi
             cur.execute("""
                 ALTER TABLE settings
                 RENAME TO settings_old
             """)
 
-            # Creăm tabelul nou
             cur.execute("""
                 CREATE TABLE settings (
                     key TEXT PRIMARY KEY,
@@ -124,7 +118,6 @@ def migrate_database(conn):
                 )
             """)
 
-            # Încercăm să recuperăm datele utile
             cur.execute("""
                 PRAGMA table_info(settings_old)
             """)
@@ -137,7 +130,7 @@ def migrate_database(conn):
             ]
 
             # -------------------------------------------------
-            # Dacă vechea bază avea name/value
+            # Structură veche: name + value
             # -------------------------------------------------
 
             if (
@@ -145,19 +138,31 @@ def migrate_database(conn):
                 and "value" in old_column_names
             ):
 
-                cur.execute("""
-                    INSERT OR IGNORE INTO settings (
-                        key,
-                        value
+                try:
+
+                    cur.execute("""
+                        INSERT OR IGNORE INTO settings (
+                            key,
+                            value
+                        )
+                        SELECT
+                            name,
+                            value
+                        FROM settings_old
+                    """)
+
+                    print(
+                        "Setările vechi au fost migrate."
                     )
-                    SELECT
-                        name,
-                        value
-                    FROM settings_old
-                """)
+
+                except Exception as e:
+
+                    print(
+                        f"Nu am putut migra setările vechi: {e}"
+                    )
 
             # -------------------------------------------------
-            # Dacă vechea bază avea setting/value
+            # Structură veche: setting + value
             # -------------------------------------------------
 
             elif (
@@ -165,20 +170,38 @@ def migrate_database(conn):
                 and "value" in old_column_names
             ):
 
-                cur.execute("""
-                    INSERT OR IGNORE INTO settings (
-                        key,
-                        value
-                    )
-                    SELECT
-                        setting,
-                        value
-                    FROM settings_old
-                """)
+                try:
 
-            # -------------------------------------------------
-            # Ștergem tabelul vechi
-            # -------------------------------------------------
+                    cur.execute("""
+                        INSERT OR IGNORE INTO settings (
+                            key,
+                            value
+                        )
+                        SELECT
+                            setting,
+                            value
+                        FROM settings_old
+                    """)
+
+                    print(
+                        "Setările vechi au fost migrate."
+                    )
+
+                except Exception as e:
+
+                    print(
+                        f"Nu am putut migra setările vechi: {e}"
+                    )
+
+            else:
+
+                print(
+                    "Structura veche settings nu poate fi migrată."
+                )
+
+                print(
+                    "Se creează un tabel settings nou."
+                )
 
             cur.execute("""
                 DROP TABLE settings_old
@@ -188,14 +211,113 @@ def migrate_database(conn):
                 "Tabelul settings a fost migrat."
             )
 
+    # =====================================================
+    # MIGRARE ATTENDANCE
+    # =====================================================
+
+    cur.execute("""
+        SELECT name
+        FROM sqlite_master
+        WHERE type = 'table'
+          AND name = 'attendance'
+    """)
+
+    attendance_exists = cur.fetchone()
+
+    if attendance_exists:
+
+        cur.execute(
+            "PRAGMA table_info(attendance)"
+        )
+
+        columns = cur.fetchall()
+
+        column_names = [
+            column["name"]
+            for column in columns
+        ]
+
+        required_columns = [
+            "id",
+            "session_id",
+            "user_id",
+            "display_name",
+            "avatar_url",
+            "started_at"
+        ]
+
+        attendance_is_correct = all(
+            column in column_names
+            for column in required_columns
+        )
+
+        # -------------------------------------------------
+        # Dacă attendance este vechi
+        # -------------------------------------------------
+
+        if not attendance_is_correct:
+
+            print(
+                "Baza de date veche pentru attendance a fost detectată."
+            )
+
+            print(
+                "Se reconstruiește tabelul attendance..."
+            )
+
+            cur.execute("""
+                ALTER TABLE attendance
+                RENAME TO attendance_old
+            """)
+
+            cur.execute("""
+                CREATE TABLE attendance (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    session_id INTEGER NOT NULL,
+                    user_id INTEGER NOT NULL,
+                    display_name TEXT NOT NULL,
+                    avatar_url TEXT,
+                    started_at TEXT NOT NULL,
+                    UNIQUE(session_id, user_id)
+                )
+            """)
+
+            print(
+                "Tabelul attendance nou a fost creat."
+            )
+
+            print(
+                "Datele vechi de attendance nu sunt compatibile "
+                "cu structura nouă și vor fi eliminate."
+            )
+
+            cur.execute("""
+                DROP TABLE attendance_old
+            """)
+
+            print(
+                "Tabelul attendance vechi a fost eliminat."
+            )
+
+
+# =========================================================
+# INITIALIZARE DATABASE
+# =========================================================
 
 def init_db():
 
     conn = get_db()
+
+    # =====================================================
+    # MIGRARE TABELE EXISTENTE
+    # =====================================================
+
+    migrate_database(conn)
+
     cur = conn.cursor()
 
     # =====================================================
-    # TABEL PREZENȚĂ
+    # ATTENDANCE
     # =====================================================
 
     cur.execute("""
@@ -211,13 +333,7 @@ def init_db():
     """)
 
     # =====================================================
-    # MIGRARE DATABASE
-    # =====================================================
-
-    migrate_database(conn)
-
-    # =====================================================
-    # SETĂRI
+    # SETTINGS
     # =====================================================
 
     cur.execute("""
@@ -226,6 +342,10 @@ def init_db():
             value TEXT
         )
     """)
+
+    # =====================================================
+    # DEFAULT SETTINGS
+    # =====================================================
 
     cur.execute("""
         INSERT OR IGNORE INTO settings (
@@ -279,13 +399,24 @@ def init_db():
     )
 
 
-def get_setting(key, default=None):
+# =========================================================
+# SETTINGS
+# =========================================================
+
+def get_setting(
+    key,
+    default=None
+):
 
     conn = get_db()
     cur = conn.cursor()
 
     cur.execute(
-        "SELECT value FROM settings WHERE key = ?",
+        """
+        SELECT value
+        FROM settings
+        WHERE key = ?
+        """,
         (key,)
     )
 
@@ -299,7 +430,10 @@ def get_setting(key, default=None):
     return row["value"]
 
 
-def set_setting(key, value):
+def set_setting(
+    key,
+    value
+):
 
     conn = get_db()
     cur = conn.cursor()
@@ -314,7 +448,8 @@ def set_setting(key, value):
             ?
         )
         ON CONFLICT(key)
-        DO UPDATE SET value = excluded.value
+        DO UPDATE SET
+            value = excluded.value
     """, (
         key,
         str(value)
@@ -323,6 +458,10 @@ def set_setting(key, value):
     conn.commit()
     conn.close()
 
+
+# =========================================================
+# SESSION
+# =========================================================
 
 def get_current_session_id():
 
@@ -343,6 +482,10 @@ def is_session_active():
         ) == "1"
     )
 
+
+# =========================================================
+# USERS
+# =========================================================
 
 def get_present_users():
 
@@ -380,9 +523,13 @@ def format_time(value):
 
     try:
 
-        dt = datetime.fromisoformat(value)
+        dt = datetime.fromisoformat(
+            value
+        )
 
-        return dt.astimezone(TZ).strftime(
+        return dt.astimezone(
+            TZ
+        ).strftime(
             "%H:%M"
         )
 
@@ -398,6 +545,10 @@ def format_time(value):
 def create_panel_embed(
     session_finished=False
 ):
+
+    # =====================================================
+    # HEADER
+    # =====================================================
 
     if session_finished:
 
@@ -420,6 +571,10 @@ def create_panel_embed(
             ),
             color=discord.Color.green()
         )
+
+    # =====================================================
+    # LISTA PREZENȚĂ
+    # =====================================================
 
     users = get_present_users()
 
@@ -447,7 +602,11 @@ def create_panel_embed(
             name = user["display_name"]
 
             if len(name) > 24:
-                name = name[:21] + "..."
+
+                name = (
+                    name[:21]
+                    + "..."
+                )
 
             ora = format_time(
                 user["started_at"]
@@ -493,6 +652,10 @@ def create_panel_embed(
                 inline=False
             )
 
+    # =====================================================
+    # FOOTER
+    # =====================================================
+
     if session_finished:
 
         embed.set_footer(
@@ -509,7 +672,7 @@ def create_panel_embed(
 
 
 # =========================================================
-# VIEW
+# PRESENCE VIEW
 # =========================================================
 
 class PresenceView(
@@ -523,7 +686,7 @@ class PresenceView(
         )
 
     # =====================================================
-    # BUTON PREZENT
+    # PREZENT
     # =====================================================
 
     @discord.ui.button(
@@ -618,7 +781,7 @@ class PresenceView(
         await update_panel()
 
     # =====================================================
-    # BUTON PLECARE
+    # PLECARE
     # =====================================================
 
     @discord.ui.button(
@@ -696,7 +859,7 @@ class PresenceView(
 
 
 # =========================================================
-# ACTUALIZARE PANEL
+# UPDATE PANEL
 # =========================================================
 
 async def update_panel():
@@ -751,7 +914,7 @@ async def update_panel():
 
 
 # =========================================================
-# SETUP PREZENȚĂ
+# /setup_prezenta
 # =========================================================
 
 @bot.tree.command(
@@ -780,6 +943,10 @@ async def setup_prezenta(
     await interaction.response.defer(
         ephemeral=True
     )
+
+    # =====================================================
+    # ȘTERGEM PANoul VECHI
+    # =====================================================
 
     old_channel_id = get_setting(
         "panel_channel_id",
@@ -821,6 +988,10 @@ async def setup_prezenta(
                 f"Nu am putut șterge panoul vechi: {e}"
             )
 
+    # =====================================================
+    # SESIUNE NOUĂ
+    # =====================================================
+
     old_session = get_current_session_id()
 
     new_session = old_session + 1
@@ -835,16 +1006,27 @@ async def setup_prezenta(
         "1"
     )
 
+    # =====================================================
+    # CURĂȚĂM DATELE SESIUNII NOI
+    # =====================================================
+
     conn = get_db()
     cur = conn.cursor()
 
     cur.execute(
-        "DELETE FROM attendance WHERE session_id = ?",
+        """
+        DELETE FROM attendance
+        WHERE session_id = ?
+        """,
         (new_session,)
     )
 
     conn.commit()
     conn.close()
+
+    # =====================================================
+    # CREĂM PANELUL
+    # =====================================================
 
     channel = interaction.channel
 
@@ -852,6 +1034,10 @@ async def setup_prezenta(
         embed=create_panel_embed(),
         view=PresenceView()
     )
+
+    # =====================================================
+    # SALVĂM PANELUL
+    # =====================================================
 
     set_setting(
         "panel_channel_id",
@@ -882,7 +1068,7 @@ async def setup_prezenta(
 
 
 # =========================================================
-# ÎNCHEIE PREZENȚA
+# /incheie_prezenta
 # =========================================================
 
 @bot.tree.command(
@@ -973,7 +1159,7 @@ async def incheie_prezenta(
 
 
 # =========================================================
-# PREZENȚA MEA
+# /prezenta
 # =========================================================
 
 @bot.tree.command(
@@ -1033,6 +1219,43 @@ async def prezenta(
         ),
         ephemeral=True
     )
+
+
+# =========================================================
+# ERROR HANDLER
+# =========================================================
+
+@bot.tree.error
+async def on_app_command_error(
+    interaction: discord.Interaction,
+    error: app_commands.AppCommandError
+):
+
+    print(
+        f"Eroare comandă Discord: {error}"
+    )
+
+    try:
+
+        if interaction.response.is_done():
+
+            await interaction.followup.send(
+                "❌ A apărut o eroare la executarea comenzii.",
+                ephemeral=True
+            )
+
+        else:
+
+            await interaction.response.send_message(
+                "❌ A apărut o eroare la executarea comenzii.",
+                ephemeral=True
+            )
+
+    except Exception as e:
+
+        print(
+            f"Nu am putut trimite mesajul de eroare: {e}"
+        )
 
 
 # =========================================================
