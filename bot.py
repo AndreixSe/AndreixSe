@@ -2149,27 +2149,37 @@ async def on_app_command_error(
     interaction: discord.Interaction,
     error: app_commands.AppCommandError
 ):
-
-    if isinstance(
-        error,
-        app_commands.CheckFailure
-    ):
-
-        command_name = ""
+    if isinstance(error, app_commands.CheckFailure):
+        command_name = ''
 
         if interaction.command:
             command_name = interaction.command.name
 
-        if command_name == "donatie":
-
+        if command_name == 'donatie':
             message = donation_create_access_message()
-
         else:
-
             message = donation_full_access_message()
 
         if interaction.response.is_done():
+            await interaction.followup.send(
+                message,
+                ephemeral=True
+            )
+        else:
+            await interaction.response.send_message(
+                message,
+                ephemeral=True
+            )
 
-            await interaction.followup.sen
+        return
+
+    print(f'❌ Eroare slash command: {error}')
 
 
+# =========================================================
+# PORNIRE BOT
+# =========================================================
+
+if __name__ == '__main__':
+    migrate_database()
+    bot.run(TOKEN)
