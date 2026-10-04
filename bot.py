@@ -20,7 +20,7 @@ TOKEN = os.getenv("DISCORD_TOKEN")
 TIMEZONE = os.getenv("TIMEZONE", "Europe/Bucharest")
 
 if not TOKEN:
-    raise RuntimeError("Lipseste DISCORD_TOKEN din variabilele de mediu.")
+    raise RuntimeError("DISCORD_TOKEN nu este setat.")
 
 try:
     TZ = ZoneInfo(TIMEZONE)
@@ -61,12 +61,20 @@ def migrate_database():
     conn = get_db()
     cur = conn.cursor()
 
+    # =====================================================
+    # SETTINGS
+    # =====================================================
+
     cur.execute("""
         CREATE TABLE IF NOT EXISTS settings (
             key TEXT PRIMARY KEY,
             value TEXT
         )
     """)
+
+    # =====================================================
+    # ATTENDANCE
+    # =====================================================
 
     cur.execute("""
         CREATE TABLE IF NOT EXISTS attendance (
@@ -86,6 +94,10 @@ def migrate_database():
         )
     """)
 
+    # =====================================================
+    # PATRULE
+    # =====================================================
+
     cur.execute("""
         CREATE TABLE IF NOT EXISTS patrols (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -104,16 +116,52 @@ def migrate_database():
         )
     """)
 
-       cur.execute("""
+    # =====================================================
+    # MIGRARE AUTOMATA PATRULE
+    # =====================================================
+
+    cur.execute("PRAGMA table_info(patrols)")
+    patrol_columns = [
+        row["name"] for row in cur.fetchall()
+    ]
+
+    patrol_migrations = {
+        "name": "TEXT",
+        "people_count": "INTEGER DEFAULT 0",
+        "cars_count": "INTEGER DEFAULT 0",
+        "color": "TEXT",
+        "patrol_date": "TEXT",
+        "patrol_time": "TEXT",
+        "image_url": "TEXT",
+        "started_at": "TEXT",
+        "ended_at": "TEXT",
+        "created_by_id": "INTEGER",
+        "created_by_name": "TEXT",
+        "active": "INTEGER DEFAULT 1"
+    }
+
+    for column, column_type in patrol_migrations.items():
+        if column not in patrol_columns:
+            cur.execute(
+                f"ALTER TABLE patrols ADD COLUMN {column} {column_type}"
+            )
+
+    # =====================================================
+    # PERSOANE PATRULA
+    # =====================================================
+
+    cur.execute("""
         CREATE TABLE IF NOT EXISTS patrol_people (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             patrol_id INTEGER,
-            user_id INTEGER
+            user_id INTEGER,
+            user_name TEXT,
+            mention TEXT
         )
     """)
 
     # =====================================================
-    # MIGRARE AUTOMATA patrol_people
+    # MIGRARE AUTOMATA PERSOANE
     # =====================================================
 
     cur.execute("PRAGMA table_info(patrol_people)")
@@ -132,40 +180,31 @@ def migrate_database():
             ALTER TABLE patrol_people
             ADD COLUMN mention TEXT
         """)
-        )
-    """)
 
-    # -----------------------------------------------------
-    # Verificam daca baza veche are image_url
-    # -----------------------------------------------------
-
-    cur.execute("PRAGMA table_info(patrols)")
-    patrol_columns = [row["name"] for row in cur.fetchall()]
-
-    if "image_url" not in patrol_columns:
-        cur.execute(
-            "ALTER TABLE patrols ADD COLUMN image_url TEXT"
-        )
-
-    # -----------------------------------------------------
-    # Setari implicite
-    # -----------------------------------------------------
+    # =====================================================
+    # SETARI
+    # =====================================================
 
     defaults = {
         "patrol_panel_channel_id": "",
         "patrol_panel_message_id": "",
         "attendance_panel_channel_id": "",
-        "attendance_panel_message_id": "",
+        "attendance_panel_message_id": ""
     }
 
     for key, value in defaults.items():
         cur.execute(
-            "INSERT OR IGNORE INTO settings(key, value) VALUES (?, ?)",
+            """
+            INSERT OR IGNORE INTO settings(key, value)
+            VALUES (?, ?)
+            """,
             (key, value)
         )
 
     conn.commit()
     conn.close()
+
+    print("✅ Baza de date verificata si migrata.")
 
 
 def get_setting(key):
@@ -178,6 +217,7 @@ def get_setting(key):
     )
 
     row = cur.fetchone()
+
     conn.close()
 
     if row:
@@ -190,12 +230,15 @@ def set_setting(key, value):
     conn = get_db()
     cur = conn.cursor()
 
-    cur.execute("""
+    cur.execute(
+        """
         INSERT INTO settings(key, value)
         VALUES (?, ?)
         ON CONFLICT(key)
         DO UPDATE SET value = excluded.value
-    """, (key, value))
+        """,
+        (key, value)
+    )
 
     conn.commit()
     conn.close()
@@ -214,7 +257,7 @@ def now_string():
 
 
 # =========================================================
-# PATROL HELPERS
+# PATRULE
 # =========================================================
 
 def get_active_patrol():
@@ -230,6 +273,7 @@ def get_active_patrol():
     """)
 
     row = cur.fetchone()
+
     conn.close()
 
     return row
@@ -247,6 +291,7 @@ def get_patrol_people(patrol_id):
     """, (patrol_id,))
 
     rows = cur.fetchall()
+
     conn.close()
 
     return rows
@@ -254,24 +299,24 @@ def get_patrol_people(patrol_id):
 
 def parse_user_mentions(text, guild):
     """
-    Primeste ceva de genul:
-
+    Exemplu:
     @Ion @Vasile @Andrei
 
-    si returneaza membrii reali ai serverului.
+    Discord trimite mentionurile ca:
+    <@123456789>
+    sau
+    <@!123456789>
     """
 
     if not text:
         return []
 
+    ids = re.findall(
+        r"<@!?(\d+)>",
+        text
+    )
+
     members = []
-
-    # Discord poate trimite mentionurile sub forma:
-    # <@123456789>
-    # <@!123456789>
-
-    ids = re.findall(r"<@!?(\d+)>", text)
-
     already_added = set()
 
     for user_id in ids:
@@ -289,38 +334,33 @@ def parse_user_mentions(text, guild):
     return members
 
 
-def build_mentions_text(people):
-    """
-    Afiseaza mentiunile reale Discord.
-    """
-
-    if not people:
-        return "Nicio persoana"
-
-    return "\n".join(
-        f"<@{person['user_id']}>"
-        for person in people
-    )
-
-
 def create_patrol_embed(patrol):
-    people = get_patrol_people(patrol["id"])
+    people = get_patrol_people(
+        patrol["id"]
+    )
 
     embed = discord.Embed(
         title="🚔 PATRULĂ",
-        description="",
         color=discord.Color.dark_purple()
     )
 
     # =====================================================
-    # PERSOANE
+    # PERSOANE - MENTIUNI REALE
     # =====================================================
 
-    mentions = build_mentions_text(people)
+    if people:
+        people_text = "\n".join(
+            row["mention"]
+            if row["mention"]
+            else f"<@{row['user_id']}>"
+            for row in people
+        )
+    else:
+        people_text = "Nicio persoană"
 
     embed.add_field(
         name="👥 PERSOANE",
-        value=mentions,
+        value=people_text,
         inline=False
     )
 
@@ -381,15 +421,20 @@ def create_patrol_embed(patrol):
     if patrol["image_url"]:
         embed.add_field(
             name="📸 POZA",
-            value=f"[🖼️ Deschide poza la rezoluție completă]({patrol['image_url']})",
+            value=(
+                f"[🖼️ Deschide poza la rezoluție completă]"
+                f"({patrol['image_url']})"
+            ),
             inline=False
         )
 
-        embed.set_image(url=patrol["image_url"])
+        embed.set_image(
+            url=patrol["image_url"]
+        )
     else:
         embed.add_field(
             name="📸 POZA",
-            value="Nu a fost încărcată nicio poză.",
+            value="Nu există poză.",
             inline=False
         )
 
@@ -410,21 +455,21 @@ def create_patrol_embed(patrol):
 
 
 # =========================================================
-# SAVE PATROL IMAGE
+# SALVARE POZA
 # =========================================================
 
-async def save_patrol_image(interaction, attachment):
-    """
-    Face o copie a pozei într-un mesaj Discord permanent.
-    Folosim URL-ul atasamentului copiat pentru embed.
-    """
-
+async def save_patrol_image(
+    interaction,
+    attachment
+):
     if not attachment:
         return None
 
-    channel_id = get_setting("patrol_panel_channel_id")
-
     channel = None
+
+    channel_id = get_setting(
+        "patrol_panel_channel_id"
+    )
 
     if channel_id:
         try:
@@ -451,17 +496,19 @@ async def save_patrol_image(interaction, attachment):
         if not photo_message.attachments:
             return None
 
-        saved_attachment = photo_message.attachments[0]
-
-        return saved_attachment.url
+        return photo_message.attachments[0].url
 
     except Exception as e:
-        print("Eroare la salvarea pozei:", e)
+        print(
+            "❌ Eroare la salvarea pozei:",
+            repr(e)
+        )
+
         return None
 
 
 # =========================================================
-# UPDATE PATROL PANEL
+# UPDATE PANOU PATRULA
 # =========================================================
 
 async def update_patrol_panel(guild):
@@ -470,14 +517,21 @@ async def update_patrol_panel(guild):
     if not patrol:
         return
 
-    channel_id = get_setting("patrol_panel_channel_id")
-    message_id = get_setting("patrol_panel_message_id")
+    channel_id = get_setting(
+        "patrol_panel_channel_id"
+    )
+
+    message_id = get_setting(
+        "patrol_panel_message_id"
+    )
 
     if not channel_id or not message_id:
         return
 
     try:
-        channel = guild.get_channel(int(channel_id))
+        channel = guild.get_channel(
+            int(channel_id)
+        )
 
         if channel is None:
             return
@@ -486,32 +540,39 @@ async def update_patrol_panel(guild):
             int(message_id)
         )
 
-        embed = create_patrol_embed(patrol)
-
         await message.edit(
-            embed=embed,
+            embed=create_patrol_embed(
+                patrol
+            ),
             view=PatrolView()
         )
 
     except Exception as e:
-        print("Eroare update panou patrula:", e)
+        print(
+            "❌ Eroare update panou patrula:",
+            repr(e)
+        )
 
 
 # =========================================================
-# PATROL VIEW
+# VIEW PATRULA
 # =========================================================
 
-class PatrolView(discord.ui.View):
+class PatrolView(
+    discord.ui.View
+):
 
     def __init__(self):
-        super().__init__(timeout=None)
+        super().__init__(
+            timeout=None
+        )
 
     @discord.ui.button(
-        label="🚔 Patrulă activă",
+        label="🚔 Vezi patrula",
         style=discord.ButtonStyle.success,
-        custom_id="patrol_status_button"
+        custom_id="patrol_view_button"
     )
-    async def patrol_status(
+    async def view_patrol(
         self,
         interaction: discord.Interaction,
         button: discord.ui.Button
@@ -525,30 +586,26 @@ class PatrolView(discord.ui.View):
             )
             return
 
-        people = get_patrol_people(patrol["id"])
-
-        mentions = build_mentions_text(people)
-
         await interaction.response.send_message(
-            f"🚔 **PATRULĂ ACTIVĂ**\n\n"
-            f"👥 **PERSOANE:**\n{mentions}\n\n"
-            f"📅 **DATA:** {patrol['patrol_date']}\n"
-            f"🕐 **ORA:** {patrol['patrol_time']}\n"
-            f"🚗 **NR AUTO:** {patrol['cars_count']}\n"
-            f"🎨 **CULOARE:** {patrol['color']}\n"
-            f"👤 **NR PERS:** {len(people)}",
+            embed=create_patrol_embed(
+                patrol
+            ),
             ephemeral=True
         )
 
 
 # =========================================================
-# ATTENDANCE
+# PONTAJ VIEW
 # =========================================================
 
-class AttendanceView(discord.ui.View):
+class AttendanceView(
+    discord.ui.View
+):
 
     def __init__(self):
-        super().__init__(timeout=None)
+        super().__init__(
+            timeout=None
+        )
 
     @discord.ui.button(
         label="🟢 Intră în tură",
@@ -566,7 +623,11 @@ class AttendanceView(discord.ui.View):
         cur = conn.cursor()
 
         cur.execute(
-            "SELECT * FROM attendance WHERE user_id = ?",
+            """
+            SELECT *
+            FROM attendance
+            WHERE user_id = ?
+            """,
             (user.id,)
         )
 
@@ -579,20 +640,24 @@ class AttendanceView(discord.ui.View):
                 "⚠️ Ești deja pontat.",
                 ephemeral=True
             )
+
             return
 
-        cur.execute("""
+        cur.execute(
+            """
             INSERT INTO attendance(
                 user_id,
                 user_name,
                 started_at
             )
             VALUES (?, ?, ?)
-        """, (
-            user.id,
-            user.display_name,
-            now_string()
-        ))
+            """,
+            (
+                user.id,
+                user.display_name,
+                now_string()
+            )
+        )
 
         conn.commit()
         conn.close()
@@ -602,7 +667,9 @@ class AttendanceView(discord.ui.View):
             ephemeral=True
         )
 
-        await update_attendance_panel(interaction.guild)
+        await update_attendance_panel(
+            interaction.guild
+        )
 
     @discord.ui.button(
         label="🔴 Ieși din tură",
@@ -620,7 +687,11 @@ class AttendanceView(discord.ui.View):
         cur = conn.cursor()
 
         cur.execute(
-            "SELECT * FROM attendance WHERE user_id = ?",
+            """
+            SELECT *
+            FROM attendance
+            WHERE user_id = ?
+            """,
             (user.id,)
         )
 
@@ -633,11 +704,13 @@ class AttendanceView(discord.ui.View):
                 "⚠️ Nu ești pontat.",
                 ephemeral=True
             )
+
             return
 
         ended = now_string()
 
-        cur.execute("""
+        cur.execute(
+            """
             INSERT INTO attendance_history(
                 user_id,
                 user_name,
@@ -645,15 +718,20 @@ class AttendanceView(discord.ui.View):
                 ended_at
             )
             VALUES (?, ?, ?, ?)
-        """, (
-            user.id,
-            existing["user_name"],
-            existing["started_at"],
-            ended
-        ))
+            """,
+            (
+                user.id,
+                existing["user_name"],
+                existing["started_at"],
+                ended
+            )
+        )
 
         cur.execute(
-            "DELETE FROM attendance WHERE user_id = ?",
+            """
+            DELETE FROM attendance
+            WHERE user_id = ?
+            """,
             (user.id,)
         )
 
@@ -665,7 +743,9 @@ class AttendanceView(discord.ui.View):
             ephemeral=True
         )
 
-        await update_attendance_panel(interaction.guild)
+        await update_attendance_panel(
+            interaction.guild
+        )
 
 
 def create_attendance_embed():
@@ -679,6 +759,7 @@ def create_attendance_embed():
     """)
 
     rows = cur.fetchall()
+
     conn.close()
 
     embed = discord.Embed(
@@ -687,7 +768,10 @@ def create_attendance_embed():
     )
 
     if not rows:
-        embed.description = "Nu este nimeni pontat momentan."
+        embed.description = (
+            "Nu este nimeni pontat momentan."
+        )
+
         return embed
 
     text = ""
@@ -695,7 +779,7 @@ def create_attendance_embed():
     for row in rows:
         text += (
             f"🟢 <@{row['user_id']}>"
-            f" — din {row['started_at']}\n"
+            f" — din `{row['started_at']}`\n"
         )
 
     embed.description = text
@@ -703,7 +787,9 @@ def create_attendance_embed():
     return embed
 
 
-async def update_attendance_panel(guild):
+async def update_attendance_panel(
+    guild
+):
     channel_id = get_setting(
         "attendance_panel_channel_id"
     )
@@ -733,7 +819,10 @@ async def update_attendance_panel(guild):
         )
 
     except Exception as e:
-        print("Eroare update panou pontaj:", e)
+        print(
+            "❌ Eroare update panou pontaj:",
+            repr(e)
+        )
 
 
 # =========================================================
@@ -744,7 +833,9 @@ async def update_attendance_panel(guild):
     name="setup_pontaj",
     description="Creează panoul de pontaj."
 )
-@app_commands.checks.has_permissions(administrator=True)
+@app_commands.checks.has_permissions(
+    administrator=True
+)
 async def setup_pontaj(
     interaction: discord.Interaction
 ):
@@ -777,15 +868,19 @@ async def setup_pontaj(
     name="setup_patrule",
     description="Creează panoul de patrule."
 )
-@app_commands.checks.has_permissions(administrator=True)
+@app_commands.checks.has_permissions(
+    administrator=True
+)
 async def setup_patrule(
     interaction: discord.Interaction
 ):
     embed = discord.Embed(
         title="🚔 PATRULE",
         description=(
-            "Folosește `/incepe_patrula` pentru a începe o patrulă.\n"
-            "Folosește `/incheie_patrula` pentru a o încheia."
+            "Folosește `/incepe_patrula` "
+            "pentru a începe o patrulă.\n\n"
+            "Folosește `/incheie_patrula` "
+            "pentru a o încheia."
         ),
         color=discord.Color.dark_purple()
     )
@@ -820,9 +915,12 @@ async def setup_patrule(
     description="Începe o patrulă."
 )
 @app_commands.describe(
-    persoane="Menționează persoanele care vin la patrulă: @Ion @Vasile @Andrei",
-    data="Data patrulei, de exemplu 04.10.2026",
-    ora="Ora patrulei, de exemplu 18:00",
+    persoane=(
+        "Menționează persoanele: "
+        "@Ion @Vasile @Andrei"
+    ),
+    data="Data, exemplu: 04.10.2026",
+    ora="Ora, exemplu: 18:00",
     nr_auto="Numărul de mașini",
     culoare="Culoarea mașinilor",
     poza="Poza patrulei"
@@ -840,23 +938,25 @@ async def incepe_patrula(
         ephemeral=True
     )
 
-    # -----------------------------------------------------
-    # Verificam daca exista deja o patrula
-    # -----------------------------------------------------
+    # =====================================================
+    # VERIFICARE PATRULA EXISTENTA
+    # =====================================================
 
     existing = get_active_patrol()
 
     if existing:
         await interaction.followup.send(
-            "❌ Există deja o patrulă activă. "
-            "Încheie patrula actuală înainte să începi alta.",
+            "❌ Există deja o patrulă activă.\n"
+            "Încheie patrula actuală înainte "
+            "să începi una nouă.",
             ephemeral=True
         )
+
         return
 
-    # -----------------------------------------------------
-    # Extragem mentionurile reale
-    # -----------------------------------------------------
+    # =====================================================
+    # PERSOANE
+    # =====================================================
 
     members = parse_user_mentions(
         persoane,
@@ -866,15 +966,28 @@ async def incepe_patrula(
     if not members:
         await interaction.followup.send(
             "❌ Nu am găsit nicio mențiune Discord.\n\n"
-            "Scrie persoanele astfel:\n"
+            "Folosește:\n"
             "`@Ion @Vasile @Andrei`",
             ephemeral=True
         )
+
         return
 
-    # -----------------------------------------------------
-    # Salvam poza
-    # -----------------------------------------------------
+    # =====================================================
+    # NR AUTO
+    # =====================================================
+
+    if nr_auto < 0:
+        await interaction.followup.send(
+            "❌ Numărul de mașini nu poate fi negativ.",
+            ephemeral=True
+        )
+
+        return
+
+    # =====================================================
+    # POZA
+    # =====================================================
 
     image_url = None
 
@@ -887,11 +1000,15 @@ async def incepe_patrula(
             "image/gif"
         }
 
-        if poza.content_type and poza.content_type not in allowed_types:
+        if (
+            poza.content_type
+            and poza.content_type not in allowed_types
+        ):
             await interaction.followup.send(
-                "❌ Fișierul încărcat nu este o imagine.",
+                "❌ Fișierul trebuie să fie o imagine.",
                 ephemeral=True
             )
+
             return
 
         image_url = await save_patrol_image(
@@ -901,20 +1018,23 @@ async def incepe_patrula(
 
         if not image_url:
             await interaction.followup.send(
-                "❌ Nu am putut salva poza. "
-                "Verifică dacă botul are permisiunea **Attach Files**.",
+                "❌ Nu am putut salva poza.\n"
+                "Verifică permisiunea **Attach Files** "
+                "a botului.",
                 ephemeral=True
             )
+
             return
 
-    # -----------------------------------------------------
-    # Cream patrula
-    # -----------------------------------------------------
+    # =====================================================
+    # CREARE PATRULA
+    # =====================================================
 
     conn = get_db()
     cur = conn.cursor()
 
-    cur.execute("""
+    cur.execute(
+        """
         INSERT INTO patrols(
             name,
             people_count,
@@ -930,29 +1050,32 @@ async def incepe_patrula(
             active
         )
         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    """, (
-        "Patrulă",
-        len(members),
-        nr_auto,
-        culoare,
-        data,
-        ora,
-        image_url,
-        now_string(),
-        None,
-        interaction.user.id,
-        interaction.user.display_name,
-        1
-    ))
+        """,
+        (
+            "Patrulă",
+            len(members),
+            nr_auto,
+            culoare,
+            data,
+            ora,
+            image_url,
+            now_string(),
+            None,
+            interaction.user.id,
+            interaction.user.display_name,
+            1
+        )
+    )
 
     patrol_id = cur.lastrowid
 
-    # -----------------------------------------------------
-    # Salvam fiecare persoana
-    # -----------------------------------------------------
+    # =====================================================
+    # SALVARE PERSOANE
+    # =====================================================
 
     for member in members:
-        cur.execute("""
+        cur.execute(
+            """
             INSERT INTO patrol_people(
                 patrol_id,
                 user_id,
@@ -960,36 +1083,38 @@ async def incepe_patrula(
                 mention
             )
             VALUES (?, ?, ?, ?)
-        """, (
-            patrol_id,
-            member.id,
-            member.display_name,
-            f"<@{member.id}>"
-        ))
+            """,
+            (
+                patrol_id,
+                member.id,
+                member.display_name,
+                member.mention
+            )
+        )
 
     conn.commit()
     conn.close()
 
-    # -----------------------------------------------------
-    # Actualizam panoul
-    # -----------------------------------------------------
+    # =====================================================
+    # UPDATE PANOU
+    # =====================================================
 
     await update_patrol_panel(
         interaction.guild
     )
 
-    # -----------------------------------------------------
-    # Confirmare
-    # -----------------------------------------------------
+    # =====================================================
+    # CONFIRMARE
+    # =====================================================
 
-    mentions = " ".join(
+    mentions = "\n".join(
         member.mention
         for member in members
     )
 
     await interaction.followup.send(
-        "✅ **Patrula a fost începută!**\n\n"
-        f"👥 **PERSOANE:** {mentions}\n"
+        "✅ **PATRULA A FOST ÎNCEPUTĂ!**\n\n"
+        f"👥 **PERSOANE:**\n{mentions}\n\n"
         f"📅 **DATA:** {data}\n"
         f"🕐 **ORA:** {ora}\n"
         f"🚗 **NR AUTO:** {nr_auto}\n"
@@ -1017,25 +1142,32 @@ async def incheie_patrula(
             "❌ Nu există nicio patrulă activă.",
             ephemeral=True
         )
+
         return
 
     conn = get_db()
     cur = conn.cursor()
 
-    cur.execute("""
+    cur.execute(
+        """
         UPDATE patrols
         SET active = 0,
             ended_at = ?
         WHERE id = ?
-    """, (
-        now_string(),
-        patrol["id"]
-    ))
+        """,
+        (
+            now_string(),
+            patrol["id"]
+        )
+    )
 
     conn.commit()
     conn.close()
 
-    # Panoul principal trebuie actualizat
+    # =====================================================
+    # UPDATE MESAJ
+    # =====================================================
+
     channel_id = get_setting(
         "patrol_panel_channel_id"
     )
@@ -1050,29 +1182,47 @@ async def incheie_patrula(
                 int(channel_id)
             )
 
-            message = await channel.fetch_message(
-                int(message_id)
-            )
+            if channel:
+                message = await channel.fetch_message(
+                    int(message_id)
+                )
 
-            old_embed = create_patrol_embed(
-                patrol
-            )
+                conn = get_db()
+                cur = conn.cursor()
 
-            old_embed.color = discord.Color.red()
+                cur.execute(
+                    """
+                    SELECT *
+                    FROM patrols
+                    WHERE id = ?
+                    """,
+                    (patrol["id"],)
+                )
 
-            old_embed.set_footer(
-                text="🔴 PATRULĂ ÎNCHEIATĂ"
-            )
+                finished_patrol = cur.fetchone()
 
-            await message.edit(
-                embed=old_embed,
-                view=PatrolView()
-            )
+                conn.close()
+
+                if finished_patrol:
+                    embed = create_patrol_embed(
+                        finished_patrol
+                    )
+
+                    embed.color = discord.Color.red()
+
+                    embed.set_footer(
+                        text="🔴 PATRULĂ ÎNCHEIATĂ"
+                    )
+
+                    await message.edit(
+                        embed=embed,
+                        view=PatrolView()
+                    )
 
         except Exception as e:
             print(
-                "Eroare actualizare patrula incheiata:",
-                e
+                "❌ Eroare patrula incheiata:",
+                repr(e)
             )
 
     await interaction.response.send_message(
@@ -1082,7 +1232,7 @@ async def incheie_patrula(
 
 
 # =========================================================
-# PATRULA
+# VEZI PATRULA
 # =========================================================
 
 @bot.tree.command(
@@ -1099,10 +1249,13 @@ async def patrula(
             "❌ Nu există nicio patrulă activă.",
             ephemeral=True
         )
+
         return
 
     await interaction.response.send_message(
-        embed=create_patrol_embed(patrol),
+        embed=create_patrol_embed(
+            patrol
+        ),
         ephemeral=True
     )
 
@@ -1121,27 +1274,17 @@ async def istoric_patrule(
     conn = get_db()
     cur = conn.cursor()
 
-    cur.execute("""
-        SELECT
-            id,
-            name,
-            people_count,
-            cars_count,
-            color,
-            patrol_date,
-            patrol_time,
-            image_url,
-            started_at,
-            ended_at,
-            created_by_id,
-            created_by_name,
-            active
+    cur.execute(
+        """
+        SELECT *
         FROM patrols
         ORDER BY id DESC
         LIMIT 20
-    """)
+        """
+    )
 
     rows = cur.fetchall()
+
     conn.close()
 
     if not rows:
@@ -1149,6 +1292,7 @@ async def istoric_patrule(
             "📭 Nu există patrule în istoric.",
             ephemeral=True
         )
+
         return
 
     embed = discord.Embed(
@@ -1161,9 +1305,15 @@ async def istoric_patrule(
             row["id"]
         )
 
-        mentions = build_mentions_text(
-            people
-        )
+        if people:
+            mentions = "\n".join(
+                p["mention"]
+                if p["mention"]
+                else f"<@{p['user_id']}>"
+                for p in people
+            )
+        else:
+            mentions = "Nicio persoană"
 
         status = (
             "🟢 ACTIVĂ"
@@ -1173,12 +1323,12 @@ async def istoric_patrule(
 
         value = (
             f"{status}\n"
-            f"👥 **Persoane:**\n{mentions}\n"
-            f"📅 **Data:** {row['patrol_date']}\n"
-            f"🕐 **Ora:** {row['patrol_time']}\n"
-            f"🚗 **Auto:** {row['cars_count']}\n"
-            f"🎨 **Culoare:** {row['color']}\n"
-            f"👤 **Nr pers:** {len(people)}"
+            f"👥 **PERSOANE:**\n{mentions}\n\n"
+            f"📅 **DATA:** {row['patrol_date']}\n"
+            f"🕐 **ORA:** {row['patrol_time']}\n"
+            f"🚗 **NR AUTO:** {row['cars_count']}\n"
+            f"🎨 **CULOARE:** {row['color']}\n"
+            f"👤 **NR PERS:** {len(people)}"
         )
 
         if row["image_url"]:
@@ -1200,7 +1350,7 @@ async def istoric_patrule(
 
 
 # =========================================================
-# COMENZI PONTAJ SUPLIMENTARE
+# PONTAJ
 # =========================================================
 
 @bot.tree.command(
@@ -1216,6 +1366,10 @@ async def pontaj(
     )
 
 
+# =========================================================
+# ISTORIC PONTAJ
+# =========================================================
+
 @bot.tree.command(
     name="istoric_pontaj",
     description="Vezi istoricul pontajului."
@@ -1226,14 +1380,17 @@ async def istoric_pontaj(
     conn = get_db()
     cur = conn.cursor()
 
-    cur.execute("""
+    cur.execute(
+        """
         SELECT *
         FROM attendance_history
         ORDER BY id DESC
         LIMIT 30
-    """)
+        """
+    )
 
     rows = cur.fetchall()
+
     conn.close()
 
     if not rows:
@@ -1241,6 +1398,7 @@ async def istoric_pontaj(
             "📭 Nu există istoric de pontaj.",
             ephemeral=True
         )
+
         return
 
     embed = discord.Embed(
@@ -1270,26 +1428,21 @@ async def istoric_pontaj(
 
 @bot.event
 async def on_ready():
-    migrate_database()
-
-    bot.add_view(PatrolView())
-    bot.add_view(AttendanceView())
+    print(
+        f"🤖 Bot conectat ca {bot.user}"
+    )
 
     try:
         synced = await bot.tree.sync()
 
         print(
-            f"Bot conectat ca {bot.user}"
-        )
-
-        print(
-            f"Comenzi sincronizate: {len(synced)}"
+            f"✅ Comenzi sincronizate: {len(synced)}"
         )
 
     except Exception as e:
         print(
-            "Eroare sincronizare comenzi:",
-            e
+            "❌ Eroare sincronizare comenzi:",
+            repr(e)
         )
 
 
@@ -1302,21 +1455,19 @@ async def on_app_command_error(
     interaction: discord.Interaction,
     error
 ):
+    print(
+        "App command error:",
+        repr(error)
+    )
+
     if isinstance(
         error,
         app_commands.errors.MissingPermissions
     ):
         message = (
-            "❌ Nu ai permisiunea necesară "
-            "pentru această comandă."
+            "❌ Nu ai permisiunea necesară."
         )
-
     else:
-        print(
-            "App command error:",
-            repr(error)
-        )
-
         message = (
             "❌ A apărut o eroare la executarea comenzii."
         )
@@ -1332,7 +1483,6 @@ async def on_app_command_error(
                 message,
                 ephemeral=True
             )
-
     except Exception:
         pass
 
