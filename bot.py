@@ -283,7 +283,7 @@ def migrate_database(conn):
             )
 
     # =====================================================
-    # MIGRARE HISTORY
+    # MIGRARE ATTENDANCE HISTORY
     # =====================================================
 
     cur.execute("""
@@ -351,7 +351,7 @@ def init_db():
     cur = conn.cursor()
 
     # =====================================================
-    # ATTENDANCE ACTIV
+    # PREZENȚE ACTIVE
     # =====================================================
 
     cur.execute("""
@@ -664,9 +664,6 @@ def create_panel_embed(
 
         embed = discord.Embed(
             title="🔴 PREZENȚĂ",
-            description=(
-                "Sesiunea de prezență este încheiată."
-            ),
             color=discord.Color.red()
         )
 
@@ -674,11 +671,6 @@ def create_panel_embed(
 
         embed = discord.Embed(
             title="🟢 PREZENȚĂ",
-            description=(
-                "Apasă **🟢 PREZENT** pentru a intra "
-                "în lista persoanelor prezente.\n\n"
-                "Apasă **🔴 PLECARE** când pleci."
-            ),
             color=discord.Color.green()
         )
 
@@ -694,77 +686,23 @@ def create_panel_embed(
 
     else:
 
-        lines = [
-            "```",
-            "#   NUME                         ORA",
-            "────────────────────────────────────"
-        ]
+        lines = []
 
-        for index, user in enumerate(
-            users,
-            start=1
-        ):
-
-            name = user["display_name"]
-
-            if len(name) > 24:
-
-                name = (
-                    name[:21]
-                    + "..."
-                )
-
-            ora = format_time(
-                user["started_at"]
-            )
+        for user in users:
 
             lines.append(
-                f"{index:<3} {name:<28} {ora}"
+                f"🟢 <@{user['user_id']}>"
             )
 
-        lines.append(
-            "```"
-        )
-
         embed.add_field(
-            name=f"👥 Prezenți: {len(users)}",
+            name="👥 Persoane prezente",
             value="\n".join(lines),
             inline=False
         )
 
-    if users and len(users) <= 5:
-
-        avatar_names = []
-
-        for user in users:
-
-            if user["avatar_url"]:
-
-                avatar_names.append(
-                    f"🟢 {user['display_name']}"
-                )
-
-        if avatar_names:
-
-            embed.add_field(
-                name="📸 Persoane prezente",
-                value="\n".join(
-                    avatar_names
-                ),
-                inline=False
-            )
-
-    if session_finished:
-
-        embed.set_footer(
-            text="Sesiunea este închisă."
-        )
-
-    else:
-
-        embed.set_footer(
-            text="Lista se actualizează automat."
-        )
+    embed.set_footer(
+        text="Lista se actualizează automat."
+    )
 
     return embed
 
@@ -797,7 +735,7 @@ def get_history():
 
 
 # =========================================================
-# HISTORY GROUPING
+# GROUP HISTORY BY USER
 # =========================================================
 
 def group_history(rows):
@@ -922,7 +860,7 @@ class PresenceView(
         current_time = now_local().isoformat()
 
         # =================================================
-        # ADĂUGĂM PREZENȚA ACTIVĂ
+        # ADĂUGĂM ÎN LISTA ACTIVĂ
         # =================================================
 
         cur.execute("""
@@ -943,7 +881,7 @@ class PresenceView(
         ))
 
         # =================================================
-        # ADĂUGĂM ȘI ÎN ISTORIC
+        # ADĂUGĂM ÎN ISTORIC
         # =================================================
 
         cur.execute("""
@@ -968,7 +906,7 @@ class PresenceView(
         conn.close()
 
         # =================================================
-        # FĂRĂ MESAJ
+        # NU TRIMITEM MESAJ
         # =================================================
 
         await interaction.response.defer(
@@ -978,11 +916,11 @@ class PresenceView(
         await update_panel()
 
     # =====================================================
-    # PLECARE
+    # NEPREZENT
     # =====================================================
 
     @discord.ui.button(
-        label="PLECARE",
+        label="NEPREZENT",
         emoji="🔴",
         style=discord.ButtonStyle.danger,
         custom_id="pontaj_plecare"
@@ -1037,7 +975,7 @@ class PresenceView(
         current_time = now_local().isoformat()
 
         # =================================================
-        # GĂSIM ULTIMA INTRARE FĂRĂ IEȘIRE
+        # ÎNCHIDEM ULTIMA PERIOADĂ FĂRĂ IEȘIRE
         # =================================================
 
         cur.execute("""
@@ -1083,7 +1021,7 @@ class PresenceView(
         conn.close()
 
         # =================================================
-        # FĂRĂ MESAJ
+        # NU TRIMITEM MESAJ
         # =================================================
 
         await interaction.response.defer(
@@ -1242,7 +1180,7 @@ async def setup_prezenta(
     )
 
     # =====================================================
-    # CURĂȚĂM DOAR PREZENȚELE ACTIVE ALE SESIUNII NOI
+    # CURĂȚĂM PREZENȚELE ACTIVE ALE SESIUNII NOI
     # =====================================================
 
     conn = get_db()
@@ -1350,10 +1288,7 @@ async def incheie_prezenta(
     )
 
     # =====================================================
-    # PĂSTRĂM ISTORICUL
-    #
-    # Dacă cineva este încă prezent, NU îi punem automat
-    # ora de ieșire. Va rămâne "ÎNCĂ PREZENT" în istoric.
+    # SCHIMBĂM PANELUL
     # =====================================================
 
     try:
@@ -1496,10 +1431,6 @@ async def istoric_prezente(
 
     rows = get_history()
 
-    # =====================================================
-    # NU EXISTĂ ISTORIC
-    # =====================================================
-
     if not rows:
 
         await interaction.followup.send(
@@ -1509,17 +1440,9 @@ async def istoric_prezente(
 
         return
 
-    # =====================================================
-    # GRUPĂM DUPĂ PERSOANĂ
-    # =====================================================
-
     grouped = group_history(
         rows
     )
-
-    # =====================================================
-    # CONSTRUIM EMBEDURI
-    # =====================================================
 
     embeds = []
 
@@ -1552,10 +1475,6 @@ async def istoric_prezente(
         value="Intrări / ieșiri",
         inline=True
     )
-
-    # =====================================================
-    # ADAUGĂM PERSOANELE
-    # =====================================================
 
     for index, person in enumerate(
         grouped,
@@ -1607,9 +1526,6 @@ async def istoric_prezente(
                 + "\n..."
             )
 
-        # Discord permite maximum 25 fields/embed.
-        # Dacă ajungem la limită, creăm alt embed.
-
         if len(current_embed.fields) >= 22:
 
             embeds.append(
@@ -1631,29 +1547,12 @@ async def istoric_prezente(
         current_embed
     )
 
-    # =====================================================
-    # TRIMITEM EMBEDURILE
-    # =====================================================
-
-    first = True
-
     for embed in embeds:
 
-        if first:
-
-            await interaction.followup.send(
-                embed=embed,
-                ephemeral=True
-            )
-
-            first = False
-
-        else:
-
-            await interaction.followup.send(
-                embed=embed,
-                ephemeral=True
-            )
+        await interaction.followup.send(
+            embed=embed,
+            ephemeral=True
+        )
 
 
 # =========================================================
