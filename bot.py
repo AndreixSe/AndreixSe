@@ -1,4 +1,4 @@
-```python
+python
 import os
 import re
 import sqlite3
@@ -2198,4 +2198,3 @@ if not TOKEN:
 migrate_database()
 
 bot.run(TOKEN)
-```
