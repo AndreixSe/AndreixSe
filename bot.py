@@ -56,10 +56,7 @@ def format_time(iso_string):
 def migrate_database(conn):
     cursor = conn.cursor()
 
-    # -----------------------------------------------------
     # SETTINGS
-    # -----------------------------------------------------
-
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS settings (
             key TEXT PRIMARY KEY,
@@ -67,10 +64,7 @@ def migrate_database(conn):
         )
     """)
 
-    # -----------------------------------------------------
     # ATTENDANCE
-    # -----------------------------------------------------
-
     cursor.execute("""
         SELECT name
         FROM sqlite_master
@@ -81,8 +75,13 @@ def migrate_database(conn):
     attendance_exists = cursor.fetchone()
 
     if attendance_exists:
+
         cursor.execute("PRAGMA table_info(attendance)")
-        columns = {row["name"] for row in cursor.fetchall()}
+
+        columns = {
+            row["name"]
+            for row in cursor.fetchall()
+        }
 
         required = {
             "id",
@@ -94,8 +93,15 @@ def migrate_database(conn):
         }
 
         if not required.issubset(columns):
-            print("Tabelul attendance este vechi. Se reconstruiește...")
-            cursor.execute("DROP TABLE attendance")
+
+            print(
+                "Tabelul attendance este vechi. "
+                "Se reconstruiește..."
+            )
+
+            cursor.execute(
+                "DROP TABLE attendance"
+            )
 
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS attendance (
@@ -109,10 +115,7 @@ def migrate_database(conn):
         )
     """)
 
-    # -----------------------------------------------------
     # ATTENDANCE HISTORY
-    # -----------------------------------------------------
-
     cursor.execute("""
         SELECT name
         FROM sqlite_master
@@ -123,8 +126,15 @@ def migrate_database(conn):
     history_exists = cursor.fetchone()
 
     if history_exists:
-        cursor.execute("PRAGMA table_info(attendance_history)")
-        columns = {row["name"] for row in cursor.fetchall()}
+
+        cursor.execute(
+            "PRAGMA table_info(attendance_history)"
+        )
+
+        columns = {
+            row["name"]
+            for row in cursor.fetchall()
+        }
 
         required = {
             "id",
@@ -137,8 +147,15 @@ def migrate_database(conn):
         }
 
         if not required.issubset(columns):
-            print("Tabelul attendance_history este vechi. Se reconstruiește...")
-            cursor.execute("DROP TABLE attendance_history")
+
+            print(
+                "Tabelul attendance_history este vechi. "
+                "Se reconstruiește..."
+            )
+
+            cursor.execute(
+                "DROP TABLE attendance_history"
+            )
 
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS attendance_history (
@@ -156,6 +173,7 @@ def migrate_database(conn):
 
 
 def init_db():
+
     conn = get_db()
 
     migrate_database(conn)
@@ -183,6 +201,7 @@ def init_db():
     """)
 
     conn.commit()
+
     conn.close()
 
     print("Database inițializată cu succes.")
@@ -193,7 +212,9 @@ def init_db():
 # =========================================================
 
 def get_setting(key, default=None):
+
     conn = get_db()
+
     cursor = conn.cursor()
 
     cursor.execute(
@@ -212,7 +233,9 @@ def get_setting(key, default=None):
 
 
 def set_setting(key, value):
+
     conn = get_db()
+
     cursor = conn.cursor()
 
     cursor.execute("""
@@ -220,18 +243,32 @@ def set_setting(key, value):
         VALUES (?, ?)
         ON CONFLICT(key)
         DO UPDATE SET value = excluded.value
-    """, (key, str(value)))
+    """, (
+        key,
+        str(value)
+    ))
 
     conn.commit()
+
     conn.close()
 
 
 def get_current_session_id():
-    return int(get_setting("session_id", "0"))
+    return int(
+        get_setting(
+            "session_id",
+            "0"
+        )
+    )
 
 
 def is_session_active():
-    return get_setting("session_active", "0") == "1"
+    return (
+        get_setting(
+            "session_active",
+            "0"
+        ) == "1"
+    )
 
 
 # =========================================================
@@ -247,13 +284,17 @@ bot = commands.Bot(
 
 
 # =========================================================
-# PANEL EMBED
+# PANOU PREZENȚĂ
 # =========================================================
 
-def create_panel_embed(session_finished=False):
+def create_panel_embed(
+    session_finished=False
+):
+
     session_id = get_current_session_id()
 
     conn = get_db()
+
     cursor = conn.cursor()
 
     cursor.execute("""
@@ -261,7 +302,9 @@ def create_panel_embed(session_finished=False):
         FROM attendance
         WHERE session_id = ?
         ORDER BY id ASC
-    """, (session_id,))
+    """, (
+        session_id,
+    ))
 
     users = cursor.fetchall()
 
@@ -277,9 +320,11 @@ def create_panel_embed(session_finished=False):
     )
 
     if users:
+
         lines = []
 
         for user in users:
+
             lines.append(
                 f"🟢 <@{user['user_id']}>"
             )
@@ -287,6 +332,7 @@ def create_panel_embed(session_finished=False):
         value = "\n".join(lines)
 
     else:
+
         value = "Nimeni nu este prezent."
 
     embed.add_field(
@@ -303,20 +349,30 @@ def create_panel_embed(session_finished=False):
 
 
 # =========================================================
-# UPDATE PANEL
+# UPDATE PANOU
 # =========================================================
 
 async def update_panel():
-    channel_id = get_setting("panel_channel_id")
-    message_id = get_setting("panel_message_id")
+
+    channel_id = get_setting(
+        "panel_channel_id"
+    )
+
+    message_id = get_setting(
+        "panel_message_id"
+    )
 
     if not channel_id or not message_id:
         return
 
     try:
-        channel = bot.get_channel(int(channel_id))
+
+        channel = bot.get_channel(
+            int(channel_id)
+        )
 
         if channel is None:
+
             channel = await bot.fetch_channel(
                 int(channel_id)
             )
@@ -327,7 +383,9 @@ async def update_panel():
 
         await message.edit(
             embed=create_panel_embed(
-                session_finished=not is_session_active()
+                session_finished=(
+                    not is_session_active()
+                )
             ),
             view=(
                 PresenceView()
@@ -337,19 +395,25 @@ async def update_panel():
         )
 
     except Exception as e:
+
         print(
             f"Eroare la actualizarea panoului: {e}"
         )
 
 
 # =========================================================
-# PRESENCE VIEW
+# BUTOANE
 # =========================================================
 
-class PresenceView(discord.ui.View):
+class PresenceView(
+    discord.ui.View
+):
 
     def __init__(self):
-        super().__init__(timeout=None)
+
+        super().__init__(
+            timeout=None
+        )
 
     # -----------------------------------------------------
     # PREZENT
@@ -366,16 +430,21 @@ class PresenceView(discord.ui.View):
         interaction: discord.Interaction,
         button: discord.ui.Button
     ):
+
         if not is_session_active():
+
             await interaction.response.defer(
                 ephemeral=True
             )
+
             return
 
         session_id = get_current_session_id()
+
         user_id = interaction.user.id
 
         conn = get_db()
+
         cursor = conn.cursor()
 
         cursor.execute("""
@@ -391,6 +460,7 @@ class PresenceView(discord.ui.View):
         existing = cursor.fetchone()
 
         if existing:
+
             conn.close()
 
             await interaction.response.defer(
@@ -401,16 +471,19 @@ class PresenceView(discord.ui.View):
 
         current_time = now_iso()
 
-        display_name = interaction.user.display_name
+        display_name = (
+            interaction.user.display_name
+        )
 
         avatar_url = None
 
         if interaction.user.avatar:
+
             avatar_url = str(
                 interaction.user.avatar.url
             )
 
-        # Adăugăm pe panoul activ.
+        # Persoana apare pe panou
         cursor.execute("""
             INSERT INTO attendance (
                 session_id,
@@ -428,7 +501,7 @@ class PresenceView(discord.ui.View):
             current_time
         ))
 
-        # Salvăm intervalul în istoric.
+        # Salvăm intervalul
         cursor.execute("""
             INSERT INTO attendance_history (
                 session_id,
@@ -448,6 +521,7 @@ class PresenceView(discord.ui.View):
         ))
 
         conn.commit()
+
         conn.close()
 
         await interaction.response.defer(
@@ -471,16 +545,21 @@ class PresenceView(discord.ui.View):
         interaction: discord.Interaction,
         button: discord.ui.Button
     ):
+
         if not is_session_active():
+
             await interaction.response.defer(
                 ephemeral=True
             )
+
             return
 
         session_id = get_current_session_id()
+
         user_id = interaction.user.id
 
         conn = get_db()
+
         cursor = conn.cursor()
 
         cursor.execute("""
@@ -496,6 +575,7 @@ class PresenceView(discord.ui.View):
         active = cursor.fetchone()
 
         if not active:
+
             conn.close()
 
             await interaction.response.defer(
@@ -506,7 +586,7 @@ class PresenceView(discord.ui.View):
 
         current_time = now_iso()
 
-        # Căutăm ultimul interval deschis.
+        # Ultimul interval deschis
         cursor.execute("""
             SELECT id
             FROM attendance_history
@@ -523,6 +603,7 @@ class PresenceView(discord.ui.View):
         history_row = cursor.fetchone()
 
         if history_row:
+
             cursor.execute("""
                 UPDATE attendance_history
                 SET ended_at = ?
@@ -532,7 +613,7 @@ class PresenceView(discord.ui.View):
                 history_row["id"]
             ))
 
-        # Scoatem persoana de pe panou.
+        # Scoatem de pe panou
         cursor.execute("""
             DELETE FROM attendance
             WHERE session_id = ?
@@ -543,6 +624,7 @@ class PresenceView(discord.ui.View):
         ))
 
         conn.commit()
+
         conn.close()
 
         await interaction.response.defer(
@@ -553,7 +635,7 @@ class PresenceView(discord.ui.View):
 
 
 # =========================================================
-# SETUP PREZENȚĂ
+# SETUP PREZENTA
 # =========================================================
 
 @bot.tree.command(
@@ -566,7 +648,7 @@ class PresenceView(discord.ui.View):
 async def setup_prezenta(
     interaction: discord.Interaction
 ):
-    # Ștergem panoul vechi dacă există.
+
     old_channel_id = get_setting(
         "panel_channel_id"
     )
@@ -575,17 +657,21 @@ async def setup_prezenta(
         "panel_message_id"
     )
 
+    # Ștergem panoul vechi
     if old_channel_id and old_message_id:
 
         try:
+
             old_channel = bot.get_channel(
                 int(old_channel_id)
             )
 
             if old_channel:
 
-                old_message = await old_channel.fetch_message(
-                    int(old_message_id)
+                old_message = (
+                    await old_channel.fetch_message(
+                        int(old_message_id)
+                    )
                 )
 
                 await old_message.delete()
@@ -593,10 +679,12 @@ async def setup_prezenta(
         except Exception:
             pass
 
-    # Creăm un nou session_id.
+    # Nou panou
     old_session_id = get_current_session_id()
 
-    new_session_id = old_session_id + 1
+    new_session_id = (
+        old_session_id + 1
+    )
 
     set_setting(
         "session_id",
@@ -608,8 +696,8 @@ async def setup_prezenta(
         "1"
     )
 
-    # Noul panou începe gol.
     conn = get_db()
+
     cursor = conn.cursor()
 
     cursor.execute("""
@@ -620,9 +708,9 @@ async def setup_prezenta(
     ))
 
     conn.commit()
+
     conn.close()
 
-    # Trimitem panoul.
     message = await interaction.channel.send(
         embed=create_panel_embed(),
         view=PresenceView()
@@ -645,7 +733,7 @@ async def setup_prezenta(
 
 
 # =========================================================
-# PREZENȚA MEA
+# PREZENTA
 # =========================================================
 
 @bot.tree.command(
@@ -655,6 +743,7 @@ async def setup_prezenta(
 async def prezenta(
     interaction: discord.Interaction
 ):
+
     if not is_session_active():
 
         await interaction.response.send_message(
@@ -665,9 +754,11 @@ async def prezenta(
         return
 
     session_id = get_current_session_id()
+
     user_id = interaction.user.id
 
     conn = get_db()
+
     cursor = conn.cursor()
 
     cursor.execute("""
@@ -694,13 +785,16 @@ async def prezenta(
         return
 
     await interaction.response.send_message(
-        f"🟢 Ești prezent de la {format_time(row['started_at'])}.",
+        (
+            f"🟢 Ești prezent de la "
+            f"{format_time(row['started_at'])}."
+        ),
         ephemeral=True
     )
 
 
 # =========================================================
-# ÎNCHEIE PREZENȚA
+# INCHEIE PREZENTA
 # =========================================================
 
 @bot.tree.command(
@@ -713,6 +807,7 @@ async def prezenta(
 async def incheie_prezenta(
     interaction: discord.Interaction
 ):
+
     if not is_session_active():
 
         await interaction.response.send_message(
@@ -741,7 +836,7 @@ async def incheie_prezenta(
 
 @bot.tree.command(
     name="istoric_prezente",
-    description="Arată prezențele de pe ultimul panou."
+    description="Arată istoricul ultimului panou."
 )
 @app_commands.checks.has_permissions(
     administrator=True
@@ -749,11 +844,9 @@ async def incheie_prezenta(
 async def istoric_prezente(
     interaction: discord.Interaction
 ):
+
     # =====================================================
-    # IMPORTANT:
-    # Luăm DOAR ultimul panou.
-    # Nu folosim data.
-    # Nu folosim panourile vechi.
+    # DOAR ULTIMUL PANOU
     # =====================================================
 
     session_id = get_current_session_id()
@@ -761,13 +854,14 @@ async def istoric_prezente(
     if session_id <= 0:
 
         await interaction.response.send_message(
-            "🔴 Nu există încă niciun panou de prezență.",
+            "🔴 Nu există încă niciun panou.",
             ephemeral=True
         )
 
         return
 
     conn = get_db()
+
     cursor = conn.cursor()
 
     cursor.execute("""
@@ -779,7 +873,7 @@ async def istoric_prezente(
         FROM attendance_history
         WHERE session_id = ?
         AND ended_at IS NOT NULL
-        ORDER BY display_name ASC, started_at ASC
+        ORDER BY id ASC
     """, (
         session_id,
     ))
@@ -798,7 +892,7 @@ async def istoric_prezente(
         return
 
     # =====================================================
-    # GRUPARE PERSOANE
+    # GRUPĂM DUPĂ PERSOANĂ
     # =====================================================
 
     users = {}
@@ -824,7 +918,9 @@ async def istoric_prezente(
         )
 
         seconds = int(
-            (end - start).total_seconds()
+            (
+                end - start
+            ).total_seconds()
         )
 
         if seconds < 0:
@@ -832,45 +928,60 @@ async def istoric_prezente(
 
         users[user_id]["intervals"].append(
             (
-                format_time(row["started_at"]),
-                format_time(row["ended_at"])
+                format_time(
+                    row["started_at"]
+                ),
+                format_time(
+                    row["ended_at"]
+                )
             )
         )
 
-        users[user_id]["total_seconds"] += seconds
+        users[user_id]["total_seconds"] += (
+            seconds
+        )
 
     # =====================================================
-    # EMBED MARE
+    # EMBED
     # =====================================================
 
     embed = discord.Embed(
         title="📋 ISTORIC PREZENȚE",
         description=(
-            f"**Prezențele de pe panoul actual**\n\n"
-            f"Panou #{session_id}"
+            f"**Panoul #{session_id}**\n"
+            f"Prezențele înregistrate pe acest panou."
         )
     )
 
-    # Facem embed-ul mai mare vizual.
-    embed.set_thumbnail(
-        url=bot.user.display_avatar.url
-    )
+    # -----------------------------------------------------
+    # FIECARE PERSOANĂ
+    # -----------------------------------------------------
 
     for user_id, data in users.items():
 
+        # Numele exact salvat de Discord.
+        name = data["name"]
+
+        # Punem @ în fața numelui.
+        display_name = f"@{name}"
+
         lines = []
 
-        # Intervalele.
+        # Intervalele
         for start_time, end_time in data["intervals"]:
 
             lines.append(
-                f"🕐 **{start_time} → {end_time}**"
+                f"🕐 {start_time} → {end_time}"
             )
 
-        # Total.
-        total_seconds = data["total_seconds"]
+        # Total
+        total_seconds = (
+            data["total_seconds"]
+        )
 
-        total_hours = total_seconds // 3600
+        total_hours = (
+            total_seconds // 3600
+        )
 
         total_minutes = (
             total_seconds % 3600
@@ -879,28 +990,14 @@ async def istoric_prezente(
         lines.append("")
 
         lines.append(
-            f"⏱️ **TOTAL: {total_hours}h {total_minutes:02d}m**"
+            f"⏱️ **TOTAL: "
+            f"{total_hours}h "
+            f"{total_minutes:02d}m**"
         )
 
-        # =================================================
-        # IMPORTANT:
-        # Nu mai folosim <@ID>.
-        # Folosim numele salvat.
-        # Astfel apare:
-        #
-        # @Andrei
-        #
-        # și nu:
-        #
-        # <@123456789>
-        # =================================================
-
-        person_name = data["name"]
-
-        field_name = f"@{person_name}"
-
+        # Fiecare persoană are propriul câmp.
         embed.add_field(
-            name=field_name,
+            name=display_name,
             value="\n".join(lines),
             inline=False
         )
@@ -924,10 +1021,12 @@ async def on_app_command_error(
     interaction: discord.Interaction,
     error: app_commands.AppCommandError
 ):
+
     if isinstance(
         error,
         app_commands.errors.MissingPermissions
     ):
+
         message = (
             "🔴 Nu ai permisiunea necesară "
             "pentru această comandă."
@@ -939,7 +1038,9 @@ async def on_app_command_error(
             f"Eroare comandă: {error}"
         )
 
-        message = "🔴 A apărut o eroare."
+        message = (
+            "🔴 A apărut o eroare."
+        )
 
     try:
 
