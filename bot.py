@@ -104,13 +104,34 @@ def migrate_database():
         )
     """)
 
-    cur.execute("""
+       cur.execute("""
         CREATE TABLE IF NOT EXISTS patrol_people (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             patrol_id INTEGER,
-            user_id INTEGER,
-            user_name TEXT,
-            mention TEXT
+            user_id INTEGER
+        )
+    """)
+
+    # =====================================================
+    # MIGRARE AUTOMATA patrol_people
+    # =====================================================
+
+    cur.execute("PRAGMA table_info(patrol_people)")
+    patrol_people_columns = [
+        row["name"] for row in cur.fetchall()
+    ]
+
+    if "user_name" not in patrol_people_columns:
+        cur.execute("""
+            ALTER TABLE patrol_people
+            ADD COLUMN user_name TEXT
+        """)
+
+    if "mention" not in patrol_people_columns:
+        cur.execute("""
+            ALTER TABLE patrol_people
+            ADD COLUMN mention TEXT
+        """)
         )
     """)
 
