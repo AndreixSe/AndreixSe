@@ -1,3 +1,4 @@
+```python
 import os
 import re
 import sqlite3
@@ -111,7 +112,10 @@ def migrate_database():
 
     # Verificăm coloanele existente în patrols
     cur.execute("PRAGMA table_info(patrols)")
-    patrol_columns = [row["name"] for row in cur.fetchall()]
+    patrol_columns = [
+        row["name"]
+        for row in cur.fetchall()
+    ]
 
     patrol_migrations = {
         "name": "TEXT",
@@ -129,7 +133,9 @@ def migrate_database():
     }
 
     for column, column_type in patrol_migrations.items():
+
         if column not in patrol_columns:
+
             cur.execute(
                 f"ALTER TABLE patrols ADD COLUMN {column} {column_type}"
             )
@@ -149,12 +155,13 @@ def migrate_database():
         )
     """)
 
-    # Citim schema existentă
     cur.execute("PRAGMA table_info(patrol_people)")
+
     patrol_people_info = cur.fetchall()
 
     patrol_people_columns = [
-        row["name"] for row in patrol_people_info
+        row["name"]
+        for row in patrol_people_info
     ]
 
     # -----------------------------------------------------
@@ -162,18 +169,21 @@ def migrate_database():
     # -----------------------------------------------------
 
     if "user_name" not in patrol_people_columns:
+
         cur.execute("""
             ALTER TABLE patrol_people
             ADD COLUMN user_name TEXT
         """)
 
     if "display_name" not in patrol_people_columns:
+
         cur.execute("""
             ALTER TABLE patrol_people
             ADD COLUMN display_name TEXT
         """)
 
     if "mention" not in patrol_people_columns:
+
         cur.execute("""
             ALTER TABLE patrol_people
             ADD COLUMN mention TEXT
@@ -183,31 +193,44 @@ def migrate_database():
     # UMPLEREA DATELOR VECHI
     # -----------------------------------------------------
 
-    # Dacă există display_name dar user_name este NULL,
-    # copiem display_name în user_name.
     cur.execute("""
         UPDATE patrol_people
         SET user_name = display_name
         WHERE user_name IS NULL
-          AND display_name IS NOT NULL
+        AND display_name IS NOT NULL
     """)
 
-    # Dacă există user_name dar display_name este NULL,
-    # copiem user_name în display_name.
     cur.execute("""
         UPDATE patrol_people
         SET display_name = user_name
         WHERE display_name IS NULL
-          AND user_name IS NOT NULL
+        AND user_name IS NOT NULL
     """)
 
-    # Dacă există user_id dar mention este NULL,
-    # construim automat mention-ul Discord.
     cur.execute("""
         UPDATE patrol_people
         SET mention = '<@' || user_id || '>'
         WHERE mention IS NULL
-          AND user_id IS NOT NULL
+        AND user_id IS NOT NULL
+    """)
+
+    # -----------------------------------------------------
+    # DONATIONS
+    # -----------------------------------------------------
+
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS donations (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            donor_id INTEGER,
+            donor_name TEXT,
+            items TEXT,
+            items_count INTEGER DEFAULT 0,
+            status TEXT DEFAULT 'pending',
+            created_at TEXT,
+            confirmed_at TEXT,
+            confirmed_by_id INTEGER,
+            confirmed_by_name TEXT
+        )
     """)
 
     # -----------------------------------------------------
@@ -217,11 +240,16 @@ def migrate_database():
     defaults = {
         "patrol_panel_channel_id": "",
         "patrol_panel_message_id": "",
+
         "attendance_panel_channel_id": "",
         "attendance_panel_message_id": "",
+
+        "donation_panel_channel_id": "",
+        "donation_panel_message_id": "",
     }
 
     for key, value in defaults.items():
+
         cur.execute("""
             INSERT OR IGNORE INTO settings(key, value)
             VALUES (?, ?)
@@ -240,6 +268,7 @@ def migrate_database():
 # =========================================================
 
 def get_setting(key):
+
     conn = get_db()
     cur = conn.cursor()
 
@@ -249,6 +278,7 @@ def get_setting(key):
     )
 
     row = cur.fetchone()
+
     conn.close()
 
     if row:
@@ -258,6 +288,7 @@ def get_setting(key):
 
 
 def set_setting(key, value):
+
     conn = get_db()
     cur = conn.cursor()
 
@@ -289,6 +320,7 @@ def now_string():
 # =========================================================
 
 def get_active_patrol():
+
     conn = get_db()
     cur = conn.cursor()
 
@@ -301,12 +333,14 @@ def get_active_patrol():
     """)
 
     row = cur.fetchone()
+
     conn.close()
 
     return row
 
 
 def get_patrol_people(patrol_id):
+
     conn = get_db()
     cur = conn.cursor()
 
@@ -318,6 +352,7 @@ def get_patrol_people(patrol_id):
     """, (patrol_id,))
 
     rows = cur.fetchall()
+
     conn.close()
 
     return rows
@@ -328,13 +363,6 @@ def get_patrol_people(patrol_id):
 # =========================================================
 
 def parse_user_mentions(text):
-    """
-    Primește ceva de forma:
-
-    <@123456789> <@987654321> <@555555555>
-
-    și returnează ID-urile.
-    """
 
     if not text:
         return []
@@ -344,10 +372,10 @@ def parse_user_mentions(text):
         text
     )
 
-    # Eliminăm duplicatele păstrând ordinea
     result = []
 
     for user_id in matches:
+
         user_id = int(user_id)
 
         if user_id not in result:
@@ -361,20 +389,28 @@ def parse_user_mentions(text):
 # =========================================================
 
 def create_patrol_embed(patrol):
-    people = get_patrol_people(patrol["id"])
+
+    people = get_patrol_people(
+        patrol["id"]
+    )
 
     people_lines = []
 
     for person in people:
+
         mention = person["mention"]
 
         if not mention:
             mention = f"<@{person['user_id']}>"
 
-        people_lines.append(mention)
+        people_lines.append(
+            mention
+        )
 
     if people_lines:
-        people_text = "\n".join(people_lines)
+        people_text = "\n".join(
+            people_lines
+        )
     else:
         people_text = "Nicio persoană"
 
@@ -426,9 +462,13 @@ def create_patrol_embed(patrol):
     )
 
     if patrol["image_url"]:
+
         embed.add_field(
             name="📸 POZA",
-            value=f"[Vezi poza în rezoluție completă]({patrol['image_url']})",
+            value=(
+                f"[Vezi poza în rezoluție completă]"
+                f"({patrol['image_url']})"
+            ),
             inline=False
         )
 
@@ -448,17 +488,12 @@ def create_patrol_embed(patrol):
 # =========================================================
 
 async def save_patrol_image(channel, attachment):
-    """
-    Copiază poza în canalul panoului.
-
-    Asta este important deoarece linkul original Discord
-    poate deveni indisponibil după expirarea attachment-ului.
-    """
 
     if attachment is None:
         return None
 
     try:
+
         file = await attachment.to_file()
 
         message = await channel.send(
@@ -467,10 +502,14 @@ async def save_patrol_image(channel, attachment):
         )
 
         if message.attachments:
+
             return message.attachments[0].url
 
     except Exception as e:
-        print(f"❌ Eroare salvare poza: {e}")
+
+        print(
+            f"❌ Eroare salvare poza: {e}"
+        )
 
     return None
 
@@ -480,6 +519,7 @@ async def save_patrol_image(channel, attachment):
 # =========================================================
 
 async def update_patrol_panel():
+
     channel_id = get_setting(
         "patrol_panel_channel_id"
     )
@@ -492,6 +532,7 @@ async def update_patrol_panel():
         return
 
     try:
+
         channel = bot.get_channel(
             int(channel_id)
         )
@@ -504,14 +545,17 @@ async def update_patrol_panel():
         )
 
     except Exception as e:
+
         print(
             f"❌ Nu pot accesa panoul patrulei: {e}"
         )
+
         return
 
     patrol = get_active_patrol()
 
     if patrol is None:
+
         embed = discord.Embed(
             title="🚓 PATRULE",
             description="Nu există nicio patrulă activă.",
@@ -525,7 +569,9 @@ async def update_patrol_panel():
 
         return
 
-    embed = create_patrol_embed(patrol)
+    embed = create_patrol_embed(
+        patrol
+    )
 
     await message.edit(
         embed=embed,
@@ -540,6 +586,7 @@ async def update_patrol_panel():
 class PatrolView(discord.ui.View):
 
     def __init__(self):
+
         super().__init__(
             timeout=None
         )
@@ -555,16 +602,21 @@ class PatrolView(discord.ui.View):
         interaction: discord.Interaction,
         button: discord.ui.Button
     ):
+
         patrol = get_active_patrol()
 
         if patrol is None:
+
             await interaction.response.send_message(
                 "❌ Nu există nicio patrulă activă.",
                 ephemeral=True
             )
+
             return
 
-        embed = create_patrol_embed(patrol)
+        embed = create_patrol_embed(
+            patrol
+        )
 
         await interaction.response.send_message(
             embed=embed,
@@ -577,6 +629,7 @@ class PatrolView(discord.ui.View):
 # =========================================================
 
 def create_attendance_embed():
+
     conn = get_db()
     cur = conn.cursor()
 
@@ -587,6 +640,7 @@ def create_attendance_embed():
     """)
 
     rows = cur.fetchall()
+
     conn.close()
 
     embed = discord.Embed(
@@ -595,18 +649,25 @@ def create_attendance_embed():
     )
 
     if not rows:
-        embed.description = "Nu este nimeni pontat momentan."
+
+        embed.description = (
+            "Nu este nimeni pontat momentan."
+        )
+
         return embed
 
     lines = []
 
     for row in rows:
+
         lines.append(
             f"👤 <@{row['user_id']}> — "
             f"🟢 {row['started_at']}"
         )
 
-    embed.description = "\n".join(lines)
+    embed.description = "\n".join(
+        lines
+    )
 
     return embed
 
@@ -614,6 +675,7 @@ def create_attendance_embed():
 class AttendanceView(discord.ui.View):
 
     def __init__(self):
+
         super().__init__(
             timeout=None
         )
@@ -629,6 +691,7 @@ class AttendanceView(discord.ui.View):
         interaction: discord.Interaction,
         button: discord.ui.Button
     ):
+
         conn = get_db()
         cur = conn.cursor()
 
@@ -640,12 +703,14 @@ class AttendanceView(discord.ui.View):
         existing = cur.fetchone()
 
         if existing:
+
             conn.close()
 
             await interaction.response.send_message(
                 "❌ Ești deja pontat.",
                 ephemeral=True
             )
+
             return
 
         cur.execute("""
@@ -682,6 +747,7 @@ class AttendanceView(discord.ui.View):
         interaction: discord.Interaction,
         button: discord.ui.Button
     ):
+
         conn = get_db()
         cur = conn.cursor()
 
@@ -693,12 +759,14 @@ class AttendanceView(discord.ui.View):
         existing = cur.fetchone()
 
         if not existing:
+
             conn.close()
 
             await interaction.response.send_message(
                 "❌ Nu ești pontat.",
                 ephemeral=True
             )
+
             return
 
         ended_at = now_string()
@@ -735,6 +803,7 @@ class AttendanceView(discord.ui.View):
 
 
 async def update_attendance_panel():
+
     channel_id = get_setting(
         "attendance_panel_channel_id"
     )
@@ -747,6 +816,7 @@ async def update_attendance_panel():
         return
 
     try:
+
         channel = bot.get_channel(
             int(channel_id)
         )
@@ -764,8 +834,376 @@ async def update_attendance_panel():
         )
 
     except Exception as e:
+
         print(
             f"❌ Eroare panou pontaj: {e}"
+        )
+
+
+# =========================================================
+# DONAȚII - DATABASE
+# =========================================================
+
+def get_donations():
+
+    conn = get_db()
+    cur = conn.cursor()
+
+    cur.execute("""
+        SELECT *
+        FROM donations
+        ORDER BY id DESC
+        LIMIT 20
+    """)
+
+    rows = cur.fetchall()
+
+    conn.close()
+
+    return rows
+
+
+def get_donation(donation_id):
+
+    conn = get_db()
+    cur = conn.cursor()
+
+    cur.execute("""
+        SELECT *
+        FROM donations
+        WHERE id = ?
+    """, (donation_id,))
+
+    row = cur.fetchone()
+
+    conn.close()
+
+    return row
+
+
+# =========================================================
+# DONAȚII - EMBED
+# =========================================================
+
+def create_donation_embed(donation):
+
+    if donation["status"] == "received":
+
+        status_text = "✅ PRIMITĂ"
+        embed_color = discord.Color.green()
+
+    else:
+
+        status_text = "❌ NEPRIMITĂ"
+        embed_color = discord.Color.red()
+
+    donor_mention = (
+        f"<@{donation['donor_id']}>"
+    )
+
+    embed = discord.Embed(
+        title=f"🎁 DONAȚIA #{donation['id']}",
+        color=embed_color
+    )
+
+    embed.add_field(
+        name="👤 DONATOR",
+        value=donor_mention,
+        inline=False
+    )
+
+    embed.add_field(
+        name="📦 OBIECTE",
+        value=donation["items"] or "-",
+        inline=False
+    )
+
+    embed.add_field(
+        name="🔢 NUMĂR",
+        value=str(
+            donation["items_count"] or 0
+        ),
+        inline=True
+    )
+
+    embed.add_field(
+        name="📌 STATUS",
+        value=status_text,
+        inline=True
+    )
+
+    embed.add_field(
+        name="📅 DATA",
+        value=donation["created_at"] or "-",
+        inline=True
+    )
+
+    if donation["status"] == "received":
+
+        embed.add_field(
+            name="✅ PRIMITĂ DE",
+            value=(
+                donation["confirmed_by_name"]
+                or "-"
+            ),
+            inline=False
+        )
+
+        embed.add_field(
+            name="🕐 CONFIRMATĂ LA",
+            value=(
+                donation["confirmed_at"]
+                or "-"
+            ),
+            inline=False
+        )
+
+    embed.set_footer(
+        text="Sistem donații"
+    )
+
+    return embed
+
+
+# =========================================================
+# DONAȚII - VIEW
+# =========================================================
+
+class DonationItemView(discord.ui.View):
+
+    def __init__(self, donation_id):
+
+        super().__init__(
+            timeout=None
+        )
+
+        self.donation_id = donation_id
+
+        # Setăm custom_id-uri unice pentru fiecare donație.
+        self.received_button.custom_id = (
+            f"donation_received_{donation_id}"
+        )
+
+        self.not_received_button.custom_id = (
+            f"donation_not_received_{donation_id}"
+        )
+
+    @discord.ui.button(
+        label="PRIMITĂ",
+        style=discord.ButtonStyle.success,
+        emoji="✅"
+    )
+    async def received_button(
+        self,
+        interaction: discord.Interaction,
+        button: discord.ui.Button
+    ):
+
+        donation = get_donation(
+            self.donation_id
+        )
+
+        if donation is None:
+
+            await interaction.response.send_message(
+                "❌ Donația nu mai există.",
+                ephemeral=True
+            )
+
+            return
+
+        if donation["status"] == "received":
+
+            await interaction.response.send_message(
+                "❌ Această donație este deja marcată ca primită.",
+                ephemeral=True
+            )
+
+            return
+
+        conn = get_db()
+        cur = conn.cursor()
+
+        cur.execute("""
+            UPDATE donations
+            SET
+                status = 'received',
+                confirmed_at = ?,
+                confirmed_by_id = ?,
+                confirmed_by_name = ?
+            WHERE id = ?
+        """, (
+            now_string(),
+            interaction.user.id,
+            interaction.user.display_name,
+            self.donation_id
+        ))
+
+        conn.commit()
+        conn.close()
+
+        updated_donation = get_donation(
+            self.donation_id
+        )
+
+        try:
+
+            await interaction.message.edit(
+                embed=create_donation_embed(
+                    updated_donation
+                ),
+                view=DonationItemView(
+                    self.donation_id
+                )
+            )
+
+        except Exception as e:
+
+            print(
+                f"❌ Eroare actualizare donație: {e}"
+            )
+
+        await interaction.response.send_message(
+            f"✅ Donația #{self.donation_id} "
+            f"a fost marcată ca **PRIMITĂ**.",
+            ephemeral=True
+        )
+
+        await update_donation_panel()
+
+    @discord.ui.button(
+        label="NEPRIMITĂ",
+        style=discord.ButtonStyle.danger,
+        emoji="❌"
+    )
+    async def not_received_button(
+        self,
+        interaction: discord.Interaction,
+        button: discord.ui.Button
+    ):
+
+        donation = get_donation(
+            self.donation_id
+        )
+
+        if donation is None:
+
+            await interaction.response.send_message(
+                "❌ Donația nu mai există.",
+                ephemeral=True
+            )
+
+            return
+
+        if donation["status"] == "received":
+
+            await interaction.response.send_message(
+                "❌ Donația este deja marcată ca primită.",
+                ephemeral=True
+            )
+
+            return
+
+        await interaction.response.send_message(
+            f"❌ Donația #{self.donation_id} "
+            f"este în continuare **NEPRIMITĂ**.",
+            ephemeral=True
+        )
+
+
+# =========================================================
+# DONAȚII - PANOU
+# =========================================================
+
+async def update_donation_panel():
+
+    channel_id = get_setting(
+        "donation_panel_channel_id"
+    )
+
+    message_id = get_setting(
+        "donation_panel_message_id"
+    )
+
+    if not channel_id or not message_id:
+        return
+
+    try:
+
+        channel = bot.get_channel(
+            int(channel_id)
+        )
+
+        if channel is None:
+            return
+
+        message = await channel.fetch_message(
+            int(message_id)
+        )
+
+        donations = get_donations()
+
+        if not donations:
+
+            embed = discord.Embed(
+                title="🎁 DONAȚII",
+                description=(
+                    "Nu există donații înregistrate."
+                ),
+                color=discord.Color.dark_grey()
+            )
+
+            await message.edit(
+                content=None,
+                embed=embed,
+                view=None
+            )
+
+            return
+
+        # Panoul principal arată rezumatul donațiilor.
+
+        embed = discord.Embed(
+            title="🎁 PANOU DONAȚII",
+            description=(
+                "Mai jos sunt ultimele donații înregistrate."
+            ),
+            color=discord.Color.gold()
+        )
+
+        for donation in donations:
+
+            if donation["status"] == "received":
+
+                status = "✅ PRIMITĂ"
+
+            else:
+
+                status = "❌ NEPRIMITĂ"
+
+            embed.add_field(
+                name=(
+                    f"🎁 Donația #{donation['id']} "
+                    f"— {status}"
+                ),
+                value=(
+                    f"👤 <@{donation['donor_id']}>\n"
+                    f"📦 {donation['items'] or '-'}\n"
+                    f"🔢 {donation['items_count'] or 0} obiecte"
+                ),
+                inline=False
+            )
+
+        await message.edit(
+            content=None,
+            embed=embed,
+            view=None
+        )
+
+    except Exception as e:
+
+        print(
+            f"❌ Eroare panou donații: {e}"
         )
 
 
@@ -818,7 +1256,9 @@ async def setup_patrule(
 
     embed = discord.Embed(
         title="🚓 PATRULE",
-        description="Nu există nicio patrulă activă.",
+        description=(
+            "Nu există nicio patrulă activă."
+        ),
         color=discord.Color.dark_grey()
     )
 
@@ -839,6 +1279,46 @@ async def setup_patrule(
 
     await interaction.response.send_message(
         "✅ Panoul de patrule a fost creat.",
+        ephemeral=True
+    )
+
+
+# =========================================================
+# SETUP DONAȚII
+# =========================================================
+
+@bot.tree.command(
+    name="setup_donatii",
+    description="Creează panoul de donații în canalul curent."
+)
+async def setup_donatii(
+    interaction: discord.Interaction
+):
+
+    embed = discord.Embed(
+        title="🎁 PANOU DONAȚII",
+        description=(
+            "Nu există donații înregistrate."
+        ),
+        color=discord.Color.dark_grey()
+    )
+
+    message = await interaction.channel.send(
+        embed=embed
+    )
+
+    set_setting(
+        "donation_panel_channel_id",
+        str(interaction.channel.id)
+    )
+
+    set_setting(
+        "donation_panel_message_id",
+        str(message.id)
+    )
+
+    await interaction.response.send_message(
+        "✅ Panoul de donații a fost creat.",
         ephemeral=True
     )
 
@@ -874,17 +1354,20 @@ async def incepe_patrula(
     )
 
     # -----------------------------------------------------
-    # VERIFICĂM DACĂ EXISTĂ PATRULĂ ACTIVĂ
+    # O SINGURĂ PATRULĂ ACTIVĂ
     # -----------------------------------------------------
 
     active_patrol = get_active_patrol()
 
     if active_patrol:
+
         await interaction.followup.send(
-            "❌ Există deja o patrulă activă. "
-            "Încheie patrula actuală înainte să începi alta.",
+            "❌ Există deja o patrulă activă.\n\n"
+            f"🚓 Patrula #{active_patrol['id']} este încă activă.\n"
+            "Încheie patrula actuală înainte să începi una nouă.",
             ephemeral=True
         )
+
         return
 
     # -----------------------------------------------------
@@ -896,12 +1379,14 @@ async def incepe_patrula(
     )
 
     if not user_ids:
+
         await interaction.followup.send(
             "❌ Nu am găsit nicio mențiune validă.\n\n"
             "Folosește persoanele prin mențiune Discord, "
             "de exemplu: `@Ion @Vasile @Andrei`.",
             ephemeral=True
         )
+
         return
 
     # -----------------------------------------------------
@@ -917,11 +1402,15 @@ async def incepe_patrula(
         )
 
         if member is None:
+
             try:
+
                 member = await interaction.guild.fetch_member(
                     user_id
                 )
+
             except Exception:
+
                 member = None
 
         if member is None:
@@ -930,10 +1419,12 @@ async def incepe_patrula(
         members.append(member)
 
     if not members:
+
         await interaction.followup.send(
             "❌ Nu am putut găsi membrii menționați pe server.",
             ephemeral=True
         )
+
         return
 
     # -----------------------------------------------------
@@ -941,10 +1432,12 @@ async def incepe_patrula(
     # -----------------------------------------------------
 
     if nr_auto < 1:
+
         await interaction.followup.send(
             "❌ Numărul de mașini trebuie să fie cel puțin 1.",
             ephemeral=True
         )
+
         return
 
     # -----------------------------------------------------
@@ -961,10 +1454,12 @@ async def incepe_patrula(
         ]
 
         if poza.content_type not in allowed_types:
+
             await interaction.followup.send(
                 "❌ Poza trebuie să fie PNG, JPG, JPEG sau WEBP.",
                 ephemeral=True
             )
+
             return
 
     # -----------------------------------------------------
@@ -976,11 +1471,13 @@ async def incepe_patrula(
     )
 
     if not panel_channel_id:
+
         await interaction.followup.send(
             "❌ Panoul de patrule nu este configurat.\n"
             "Rulează mai întâi `/setup_patrule`.",
             ephemeral=True
         )
+
         return
 
     panel_channel = bot.get_channel(
@@ -988,10 +1485,12 @@ async def incepe_patrula(
     )
 
     if panel_channel is None:
+
         await interaction.followup.send(
             "❌ Nu am găsit canalul panoului de patrule.",
             ephemeral=True
         )
+
         return
 
     # -----------------------------------------------------
@@ -1001,6 +1500,7 @@ async def incepe_patrula(
     image_url = None
 
     if poza is not None:
+
         image_url = await save_patrol_image(
             panel_channel,
             poza
@@ -1050,9 +1550,6 @@ async def incepe_patrula(
 
     # -----------------------------------------------------
     # SALVĂM PERSOANELE
-    #
-    # IMPORTANT:
-    # display_name este inclus pentru baza veche.
     # -----------------------------------------------------
 
     for member in members:
@@ -1098,6 +1595,7 @@ async def incepe_patrula(
 
     await interaction.followup.send(
         "✅ **Patrula a fost începută cu succes!**\n\n"
+        f"🚓 Patrula #{patrol_id}\n"
         f"👥 Persoane: {mentions_text}\n"
         f"📅 Data: {data}\n"
         f"🕐 Ora: {ora}\n"
@@ -1127,10 +1625,12 @@ async def incheie_patrula(
     patrol = get_active_patrol()
 
     if patrol is None:
+
         await interaction.followup.send(
             "❌ Nu există nicio patrulă activă.",
             ephemeral=True
         )
+
         return
 
     ended_at = now_string()
@@ -1151,7 +1651,6 @@ async def incheie_patrula(
 
     conn.commit()
 
-    # Luăm din nou patrula după update
     cur.execute(
         "SELECT * FROM patrols WHERE id = ?",
         (patrol["id"],)
@@ -1168,7 +1667,7 @@ async def incheie_patrula(
     await update_patrol_panel()
 
     # -----------------------------------------------------
-    # AFIȘĂM CONFIRMAREA
+    # CONFIRMARE
     # -----------------------------------------------------
 
     embed = create_patrol_embed(
@@ -1197,10 +1696,12 @@ async def patrula(
     patrol = get_active_patrol()
 
     if patrol is None:
+
         await interaction.response.send_message(
             "❌ Nu există nicio patrulă activă.",
             ephemeral=True
         )
+
         return
 
     embed = create_patrol_embed(
@@ -1236,13 +1737,16 @@ async def istoric_patrule(
     """)
 
     rows = cur.fetchall()
+
     conn.close()
 
     if not rows:
+
         await interaction.response.send_message(
             "❌ Nu există patrule înregistrate.",
             ephemeral=True
         )
+
         return
 
     embed = discord.Embed(
@@ -1252,10 +1756,17 @@ async def istoric_patrule(
 
     for patrol in rows:
 
-        status = "🟢 ACTIVĂ" if patrol["active"] else "🔴 ÎNCHEIATĂ"
+        status = (
+            "🟢 ACTIVĂ"
+            if patrol["active"]
+            else "🔴 ÎNCHEIATĂ"
+        )
 
         embed.add_field(
-            name=f"🚓 Patrula #{patrol['id']} — {status}",
+            name=(
+                f"🚓 Patrula #{patrol['id']} "
+                f"— {status}"
+            ),
             value=(
                 f"📅 {patrol['patrol_date'] or '-'}\n"
                 f"🕐 {patrol['patrol_time'] or '-'}\n"
@@ -1315,13 +1826,16 @@ async def istoric_pontaj(
     """)
 
     rows = cur.fetchall()
+
     conn.close()
 
     if not rows:
+
         await interaction.response.send_message(
             "❌ Nu există istoric de pontaj.",
             ephemeral=True
         )
+
         return
 
     embed = discord.Embed(
@@ -1336,6 +1850,204 @@ async def istoric_pontaj(
             value=(
                 f"🟢 Început: {row['started_at']}\n"
                 f"🔴 Sfârșit: {row['ended_at']}"
+            ),
+            inline=False
+        )
+
+    await interaction.response.send_message(
+        embed=embed,
+        ephemeral=True
+    )
+
+
+# =========================================================
+# ÎNREGISTREAZĂ DONAȚIE
+# =========================================================
+
+@bot.tree.command(
+    name="donatie",
+    description="Înregistrează o donație."
+)
+@app_commands.describe(
+    persoana="Persoana care face donația",
+    obiecte="Obiectele donate",
+    numar="Numărul total de obiecte"
+)
+async def donatie(
+    interaction: discord.Interaction,
+    persoana: discord.Member,
+    obiecte: str,
+    numar: int
+):
+
+    await interaction.response.defer(
+        ephemeral=True
+    )
+
+    if numar < 1:
+
+        await interaction.followup.send(
+            "❌ Numărul de obiecte trebuie să fie cel puțin 1.",
+            ephemeral=True
+        )
+
+        return
+
+    panel_channel_id = get_setting(
+        "donation_panel_channel_id"
+    )
+
+    if not panel_channel_id:
+
+        await interaction.followup.send(
+            "❌ Panoul de donații nu este configurat.\n"
+            "Rulează mai întâi `/setup_donatii`.",
+            ephemeral=True
+        )
+
+        return
+
+    conn = get_db()
+    cur = conn.cursor()
+
+    cur.execute("""
+        INSERT INTO donations(
+            donor_id,
+            donor_name,
+            items,
+            items_count,
+            status,
+            created_at,
+            confirmed_at,
+            confirmed_by_id,
+            confirmed_by_name
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+    """, (
+        persoana.id,
+        persoana.display_name,
+        obiecte,
+        numar,
+        "pending",
+        now_string(),
+        None,
+        None,
+        None
+    ))
+
+    donation_id = cur.lastrowid
+
+    conn.commit()
+    conn.close()
+
+    # -----------------------------------------------------
+    # CREĂM MESAJUL DONAȚIEI
+    # -----------------------------------------------------
+
+    try:
+
+        channel = bot.get_channel(
+            int(panel_channel_id)
+        )
+
+        if channel is None:
+
+            await interaction.followup.send(
+                "❌ Canalul panoului de donații nu a fost găsit.",
+                ephemeral=True
+            )
+
+            return
+
+        donation = get_donation(
+            donation_id
+        )
+
+        await channel.send(
+            embed=create_donation_embed(
+                donation
+            ),
+            view=DonationItemView(
+                donation_id
+            )
+        )
+
+    except Exception as e:
+
+        print(
+            f"❌ Eroare creare mesaj donație: {e}"
+        )
+
+        await interaction.followup.send(
+            "❌ Donația a fost salvată în baza de date, "
+            "dar nu am putut afișa panoul donației.",
+            ephemeral=True
+        )
+
+        return
+
+    # Actualizăm și panoul principal
+    await update_donation_panel()
+
+    await interaction.followup.send(
+        "✅ **Donația a fost înregistrată!**\n\n"
+        f"🎁 Donație #{donation_id}\n"
+        f"👤 Donator: {persoana.mention}\n"
+        f"📦 Obiecte: {obiecte}\n"
+        f"🔢 Număr: {numar}\n"
+        f"📌 Status: ❌ NEPRIMITĂ",
+        ephemeral=True
+    )
+
+
+# =========================================================
+# VEZI DONAȚII
+# =========================================================
+
+@bot.tree.command(
+    name="donatii",
+    description="Afișează donațiile recente."
+)
+async def donatii(
+    interaction: discord.Interaction
+):
+
+    donations = get_donations()
+
+    if not donations:
+
+        await interaction.response.send_message(
+            "❌ Nu există donații înregistrate.",
+            ephemeral=True
+        )
+
+        return
+
+    embed = discord.Embed(
+        title="🎁 DONAȚII",
+        color=discord.Color.gold()
+    )
+
+    for donation in donations:
+
+        if donation["status"] == "received":
+
+            status = "✅ PRIMITĂ"
+
+        else:
+
+            status = "❌ NEPRIMITĂ"
+
+        embed.add_field(
+            name=(
+                f"🎁 Donația #{donation['id']} "
+                f"— {status}"
+            ),
+            value=(
+                f"👤 <@{donation['donor_id']}>\n"
+                f"📦 {donation['items'] or '-'}\n"
+                f"🔢 {donation['items_count'] or 0} obiecte\n"
+                f"📅 {donation['created_at'] or '-'}"
             ),
             inline=False
         )
@@ -1362,6 +2074,7 @@ async def on_ready():
     # -----------------------------------------------------
 
     try:
+
         synced = await bot.tree.sync()
 
         print(
@@ -1379,6 +2092,7 @@ async def on_ready():
     # -----------------------------------------------------
 
     try:
+
         bot.add_view(
             PatrolView()
         )
@@ -1387,8 +2101,31 @@ async def on_ready():
             AttendanceView()
         )
 
+        # IMPORTANT:
+        # Butoanele donațiilor sunt dinamice și au
+        # custom_id unic pentru fiecare donație.
+        #
+        # Donațiile noi își creează propriul View.
+        # Pentru butoanele donațiilor existente după restart,
+        # le înregistrăm mai jos.
+
+        donations = get_donations()
+
+        for donation in donations:
+
+            bot.add_view(
+                DonationItemView(
+                    donation["id"]
+                )
+            )
+
         print(
             "✅ Butoanele persistente au fost încărcate."
+        )
+
+        print(
+            f"✅ Au fost încărcate "
+            f"{len(donations)} donații."
         )
 
     except Exception as e:
@@ -1412,14 +2149,14 @@ async def on_app_command_error(
         f"❌ App command error: {repr(error)}"
     )
 
-    # Dacă este deja CommandInvokeError,
-    # afișăm cauza reală.
     if isinstance(
         error,
         app_commands.CommandInvokeError
     ):
+
         print(
-            f"❌ Cauza reală: {repr(error.original)}"
+            f"❌ Cauza reală: "
+            f"{repr(error.original)}"
         )
 
     try:
@@ -1449,6 +2186,7 @@ async def on_app_command_error(
 # =========================================================
 
 if not TOKEN:
+
     raise RuntimeError(
         "DISCORD_TOKEN nu este setat."
     )
@@ -1456,6 +2194,8 @@ if not TOKEN:
 
 # Foarte important:
 # Migrarea se face ÎNAINTE să pornească botul.
+
 migrate_database()
 
 bot.run(TOKEN)
+```
