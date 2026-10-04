@@ -1,6 +1,6 @@
 import os
 import sqlite3
-from datetime import datetime
+from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
 import discord
@@ -52,7 +52,7 @@ bot = commands.Bot(
 
 
 # =========================================================
-# DATABASE FUNCTIONS
+# DATABASE CONNECTION
 # =========================================================
 
 def get_db():
@@ -95,7 +95,6 @@ def migrate_database(conn):
             for column in columns
         ]
 
-        # Dacă lipsește "key", este structura veche
         if "key" not in column_names:
 
             print(
@@ -129,10 +128,6 @@ def migrate_database(conn):
                 for column in old_columns
             ]
 
-            # -------------------------------------------------
-            # Structură veche: name + value
-            # -------------------------------------------------
-
             if (
                 "name" in old_column_names
                 and "value" in old_column_names
@@ -160,10 +155,6 @@ def migrate_database(conn):
                     print(
                         f"Nu am putut migra setările vechi: {e}"
                     )
-
-            # -------------------------------------------------
-            # Structură veche: setting + value
-            # -------------------------------------------------
 
             elif (
                 "setting" in old_column_names
@@ -197,10 +188,6 @@ def migrate_database(conn):
 
                 print(
                     "Structura veche settings nu poate fi migrată."
-                )
-
-                print(
-                    "Se creează un tabel settings nou."
                 )
 
             cur.execute("""
@@ -251,10 +238,6 @@ def migrate_database(conn):
             for column in required_columns
         )
 
-        # -------------------------------------------------
-        # Dacă attendance este vechi
-        # -------------------------------------------------
-
         if not attendance_is_correct:
 
             print(
@@ -299,6 +282,61 @@ def migrate_database(conn):
                 "Tabelul attendance vechi a fost eliminat."
             )
 
+    # =====================================================
+    # MIGRARE HISTORY
+    # =====================================================
+
+    cur.execute("""
+        SELECT name
+        FROM sqlite_master
+        WHERE type = 'table'
+          AND name = 'attendance_history'
+    """)
+
+    history_exists = cur.fetchone()
+
+    if history_exists:
+
+        cur.execute(
+            "PRAGMA table_info(attendance_history)"
+        )
+
+        columns = cur.fetchall()
+
+        column_names = [
+            column["name"]
+            for column in columns
+        ]
+
+        required_history_columns = [
+            "id",
+            "session_id",
+            "user_id",
+            "display_name",
+            "avatar_url",
+            "started_at",
+            "ended_at"
+        ]
+
+        history_is_correct = all(
+            column in column_names
+            for column in required_history_columns
+        )
+
+        if not history_is_correct:
+
+            print(
+                "Structura veche pentru attendance_history a fost detectată."
+            )
+
+            cur.execute("""
+                DROP TABLE attendance_history
+            """)
+
+            print(
+                "Tabelul attendance_history vechi a fost eliminat."
+            )
+
 
 # =========================================================
 # INITIALIZARE DATABASE
@@ -308,16 +346,12 @@ def init_db():
 
     conn = get_db()
 
-    # =====================================================
-    # MIGRARE TABELE EXISTENTE
-    # =====================================================
-
     migrate_database(conn)
 
     cur = conn.cursor()
 
     # =====================================================
-    # ATTENDANCE
+    # ATTENDANCE ACTIV
     # =====================================================
 
     cur.execute("""
@@ -329,6 +363,22 @@ def init_db():
             avatar_url TEXT,
             started_at TEXT NOT NULL,
             UNIQUE(session_id, user_id)
+        )
+    """)
+
+    # =====================================================
+    # ISTORIC
+    # =====================================================
+
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS attendance_history (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            session_id INTEGER NOT NULL,
+            user_id INTEGER NOT NULL,
+            display_name TEXT NOT NULL,
+            avatar_url TEXT,
+            started_at TEXT NOT NULL,
+            ended_at TEXT
         )
     """)
 
@@ -484,7 +534,99 @@ def is_session_active():
 
 
 # =========================================================
-# USERS
+# TIME
+# =========================================================
+
+def now_local():
+
+    return datetime.now(TZ)
+
+
+def parse_datetime(value):
+
+    try:
+
+        dt = datetime.fromisoformat(value)
+
+        if dt.tzinfo is None:
+
+            dt = dt.replace(
+                tzinfo=TZ
+            )
+
+        return dt.astimezone(TZ)
+
+    except Exception:
+
+        return None
+
+
+def format_time(value):
+
+    dt = parse_datetime(value)
+
+    if dt is None:
+
+        return "--:--"
+
+    return dt.strftime(
+        "%H:%M"
+    )
+
+
+def calculate_duration(
+    started_at,
+    ended_at
+):
+
+    start = parse_datetime(
+        started_at
+    )
+
+    end = parse_datetime(
+        ended_at
+    )
+
+    if start is None:
+
+        return timedelta(0)
+
+    if end is None:
+
+        end = now_local()
+
+    duration = end - start
+
+    if duration.total_seconds() < 0:
+
+        return timedelta(0)
+
+    return duration
+
+
+def format_duration(
+    duration
+):
+
+    total_seconds = int(
+        duration.total_seconds()
+    )
+
+    hours = total_seconds // 3600
+
+    minutes = (
+        total_seconds % 3600
+    ) // 60
+
+    if hours > 0:
+
+        return f"{hours}h {minutes}m"
+
+    return f"{minutes}m"
+
+
+# =========================================================
+# ACTIVE USERS
 # =========================================================
 
 def get_present_users():
@@ -511,44 +653,12 @@ def get_present_users():
 
 
 # =========================================================
-# TIME
-# =========================================================
-
-def now_local():
-
-    return datetime.now(TZ)
-
-
-def format_time(value):
-
-    try:
-
-        dt = datetime.fromisoformat(
-            value
-        )
-
-        return dt.astimezone(
-            TZ
-        ).strftime(
-            "%H:%M"
-        )
-
-    except Exception:
-
-        return "--:--"
-
-
-# =========================================================
 # PANEL EMBED
 # =========================================================
 
 def create_panel_embed(
     session_finished=False
 ):
-
-    # =====================================================
-    # HEADER
-    # =====================================================
 
     if session_finished:
 
@@ -571,10 +681,6 @@ def create_panel_embed(
             ),
             color=discord.Color.green()
         )
-
-    # =====================================================
-    # LISTA PREZENȚĂ
-    # =====================================================
 
     users = get_present_users()
 
@@ -626,10 +732,6 @@ def create_panel_embed(
             inline=False
         )
 
-    # =====================================================
-    # AVATARURI
-    # =====================================================
-
     if users and len(users) <= 5:
 
         avatar_names = []
@@ -652,10 +754,6 @@ def create_panel_embed(
                 inline=False
             )
 
-    # =====================================================
-    # FOOTER
-    # =====================================================
-
     if session_finished:
 
         embed.set_footer(
@@ -669,6 +767,77 @@ def create_panel_embed(
         )
 
     return embed
+
+
+# =========================================================
+# HISTORY
+# =========================================================
+
+def get_history():
+
+    session_id = get_current_session_id()
+
+    conn = get_db()
+    cur = conn.cursor()
+
+    cur.execute("""
+        SELECT *
+        FROM attendance_history
+        WHERE session_id = ?
+        ORDER BY id ASC
+    """, (
+        session_id,
+    ))
+
+    rows = cur.fetchall()
+
+    conn.close()
+
+    return rows
+
+
+# =========================================================
+# HISTORY GROUPING
+# =========================================================
+
+def group_history(rows):
+
+    grouped = {}
+
+    for row in rows:
+
+        user_id = row["user_id"]
+
+        if user_id not in grouped:
+
+            grouped[user_id] = {
+                "user_id": user_id,
+                "display_name": row["display_name"],
+                "avatar_url": row["avatar_url"],
+                "periods": [],
+                "total": timedelta(0)
+            }
+
+        start = row["started_at"]
+        end = row["ended_at"]
+
+        grouped[user_id]["periods"].append(
+            (
+                start,
+                end
+            )
+        )
+
+        grouped[user_id]["total"] += (
+            calculate_duration(
+                start,
+                end
+            )
+        )
+
+    return list(
+        grouped.values()
+    )
 
 
 # =========================================================
@@ -703,9 +872,7 @@ class PresenceView(
 
         if not is_session_active():
 
-            await interaction.response.send_message(
-                "❌ Momentan nu există o sesiune "
-                "de prezență activă.",
+            await interaction.response.defer(
                 ephemeral=True
             )
 
@@ -713,9 +880,7 @@ class PresenceView(
 
         user = interaction.user
 
-        session_id = (
-            get_current_session_id()
-        )
+        session_id = get_current_session_id()
 
         avatar_url = None
 
@@ -727,6 +892,10 @@ class PresenceView(
 
         conn = get_db()
         cur = conn.cursor()
+
+        # =================================================
+        # VERIFICĂM DACĂ ESTE DEJA PREZENT
+        # =================================================
 
         cur.execute("""
             SELECT id
@@ -744,14 +913,17 @@ class PresenceView(
 
             conn.close()
 
-            await interaction.response.send_message(
-                "🟢 Ești deja în lista persoanelor prezente.",
+            await interaction.response.defer(
                 ephemeral=True
             )
 
             return
 
         current_time = now_local().isoformat()
+
+        # =================================================
+        # ADĂUGĂM PREZENȚA ACTIVĂ
+        # =================================================
 
         cur.execute("""
             INSERT INTO attendance (
@@ -770,11 +942,36 @@ class PresenceView(
             current_time
         ))
 
+        # =================================================
+        # ADĂUGĂM ȘI ÎN ISTORIC
+        # =================================================
+
+        cur.execute("""
+            INSERT INTO attendance_history (
+                session_id,
+                user_id,
+                display_name,
+                avatar_url,
+                started_at,
+                ended_at
+            )
+            VALUES (?, ?, ?, ?, ?, NULL)
+        """, (
+            session_id,
+            user.id,
+            user.display_name,
+            avatar_url,
+            current_time
+        ))
+
         conn.commit()
         conn.close()
 
-        await interaction.response.send_message(
-            "🟢 Ai fost adăugat în lista de prezență.",
+        # =================================================
+        # FĂRĂ MESAJ
+        # =================================================
+
+        await interaction.response.defer(
             ephemeral=True
         )
 
@@ -798,9 +995,7 @@ class PresenceView(
 
         if not is_session_active():
 
-            await interaction.response.send_message(
-                "❌ Momentan nu există o sesiune "
-                "de prezență activă.",
+            await interaction.response.defer(
                 ephemeral=True
             )
 
@@ -808,15 +1003,17 @@ class PresenceView(
 
         user = interaction.user
 
-        session_id = (
-            get_current_session_id()
-        )
+        session_id = get_current_session_id()
 
         conn = get_db()
         cur = conn.cursor()
 
+        # =================================================
+        # VERIFICĂM DACĂ ESTE PREZENT
+        # =================================================
+
         cur.execute("""
-            SELECT id
+            SELECT *
             FROM attendance
             WHERE session_id = ?
               AND user_id = ?
@@ -831,12 +1028,47 @@ class PresenceView(
 
             conn.close()
 
-            await interaction.response.send_message(
-                "❌ Nu ești în lista persoanelor prezente.",
+            await interaction.response.defer(
                 ephemeral=True
             )
 
             return
+
+        current_time = now_local().isoformat()
+
+        # =================================================
+        # GĂSIM ULTIMA INTRARE FĂRĂ IEȘIRE
+        # =================================================
+
+        cur.execute("""
+            SELECT id
+            FROM attendance_history
+            WHERE session_id = ?
+              AND user_id = ?
+              AND ended_at IS NULL
+            ORDER BY id DESC
+            LIMIT 1
+        """, (
+            session_id,
+            user.id
+        ))
+
+        history_row = cur.fetchone()
+
+        if history_row:
+
+            cur.execute("""
+                UPDATE attendance_history
+                SET ended_at = ?
+                WHERE id = ?
+            """, (
+                current_time,
+                history_row["id"]
+            ))
+
+        # =================================================
+        # ȘTERGEM DIN LISTA ACTIVĂ
+        # =================================================
 
         cur.execute("""
             DELETE FROM attendance
@@ -850,8 +1082,11 @@ class PresenceView(
         conn.commit()
         conn.close()
 
-        await interaction.response.send_message(
-            "🔴 Ai fost scos din lista de prezență.",
+        # =================================================
+        # FĂRĂ MESAJ
+        # =================================================
+
+        await interaction.response.defer(
             ephemeral=True
         )
 
@@ -945,7 +1180,7 @@ async def setup_prezenta(
     )
 
     # =====================================================
-    # ȘTERGEM PANoul VECHI
+    # ȘTERGEM PANELUL VECHI
     # =====================================================
 
     old_channel_id = get_setting(
@@ -1007,19 +1242,18 @@ async def setup_prezenta(
     )
 
     # =====================================================
-    # CURĂȚĂM DATELE SESIUNII NOI
+    # CURĂȚĂM DOAR PREZENȚELE ACTIVE ALE SESIUNII NOI
     # =====================================================
 
     conn = get_db()
     cur = conn.cursor()
 
-    cur.execute(
-        """
+    cur.execute("""
         DELETE FROM attendance
         WHERE session_id = ?
-        """,
-        (new_session,)
-    )
+    """, (
+        new_session,
+    ))
 
     conn.commit()
     conn.close()
@@ -1106,10 +1340,21 @@ async def incheie_prezenta(
         ephemeral=True
     )
 
+    # =====================================================
+    # ÎNCHIDEM SESIUNEA
+    # =====================================================
+
     set_setting(
         "session_active",
         "0"
     )
+
+    # =====================================================
+    # PĂSTRĂM ISTORICUL
+    #
+    # Dacă cineva este încă prezent, NU îi punem automat
+    # ora de ieșire. Va rămâne "ÎNCĂ PREZENT" în istoric.
+    # =====================================================
 
     try:
 
@@ -1182,9 +1427,7 @@ async def prezenta(
 
         return
 
-    session_id = (
-        get_current_session_id()
-    )
+    session_id = get_current_session_id()
 
     conn = get_db()
     cur = conn.cursor()
@@ -1219,6 +1462,198 @@ async def prezenta(
         ),
         ephemeral=True
     )
+
+
+# =========================================================
+# /istoric_prezente
+# =========================================================
+
+@bot.tree.command(
+    name="istoric_prezente",
+    description=(
+        "Afișează istoricul persoanelor prezente."
+    )
+)
+@app_commands.default_permissions(
+    administrator=True
+)
+async def istoric_prezente(
+    interaction: discord.Interaction
+):
+
+    if not interaction.user.guild_permissions.administrator:
+
+        await interaction.response.send_message(
+            "❌ Nu ai permisiunea de Administrator.",
+            ephemeral=True
+        )
+
+        return
+
+    await interaction.response.defer(
+        ephemeral=True
+    )
+
+    rows = get_history()
+
+    # =====================================================
+    # NU EXISTĂ ISTORIC
+    # =====================================================
+
+    if not rows:
+
+        await interaction.followup.send(
+            "📋 Nu există încă persoane în istoricul acestei sesiuni.",
+            ephemeral=True
+        )
+
+        return
+
+    # =====================================================
+    # GRUPĂM DUPĂ PERSOANĂ
+    # =====================================================
+
+    grouped = group_history(
+        rows
+    )
+
+    # =====================================================
+    # CONSTRUIM EMBEDURI
+    # =====================================================
+
+    embeds = []
+
+    current_embed = discord.Embed(
+        title="📋 ISTORIC PREZENȚĂ",
+        description=(
+            f"Sesiunea #{get_current_session_id()}"
+        ),
+        color=discord.Color.blue()
+    )
+
+    current_embed.add_field(
+        name="👥 Persoane",
+        value=str(
+            len(grouped)
+        ),
+        inline=True
+    )
+
+    current_embed.add_field(
+        name="📝 Intrări",
+        value=str(
+            len(rows)
+        ),
+        inline=True
+    )
+
+    current_embed.add_field(
+        name="🕐 Status",
+        value="Intrări / ieșiri",
+        inline=True
+    )
+
+    # =====================================================
+    # ADAUGĂM PERSOANELE
+    # =====================================================
+
+    for index, person in enumerate(
+        grouped,
+        start=1
+    ):
+
+        name = person["display_name"]
+
+        periods = person["periods"]
+
+        lines = []
+
+        for started_at, ended_at in periods:
+
+            start_text = format_time(
+                started_at
+            )
+
+            if ended_at:
+
+                end_text = format_time(
+                    ended_at
+                )
+
+                lines.append(
+                    f"`{start_text} → {end_text}`"
+                )
+
+            else:
+
+                lines.append(
+                    f"`{start_text} → ÎNCĂ PREZENT`"
+                )
+
+        total_text = format_duration(
+            person["total"]
+        )
+
+        value = (
+            "\n".join(lines)
+            + "\n"
+            + f"**TOTAL: {total_text}**"
+        )
+
+        if len(value) > 1000:
+
+            value = (
+                value[:950]
+                + "\n..."
+            )
+
+        # Discord permite maximum 25 fields/embed.
+        # Dacă ajungem la limită, creăm alt embed.
+
+        if len(current_embed.fields) >= 22:
+
+            embeds.append(
+                current_embed
+            )
+
+            current_embed = discord.Embed(
+                title="📋 ISTORIC PREZENȚĂ — continuare",
+                color=discord.Color.blue()
+            )
+
+        current_embed.add_field(
+            name=f"{index}. {name}",
+            value=value,
+            inline=False
+        )
+
+    embeds.append(
+        current_embed
+    )
+
+    # =====================================================
+    # TRIMITEM EMBEDURILE
+    # =====================================================
+
+    first = True
+
+    for embed in embeds:
+
+        if first:
+
+            await interaction.followup.send(
+                embed=embed,
+                ephemeral=True
+            )
+
+            first = False
+
+        else:
+
+            await interaction.followup.send(
+                embed=embed,
+                ephemeral=True
+            )
 
 
 # =========================================================
