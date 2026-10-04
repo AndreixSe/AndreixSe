@@ -1,6 +1,6 @@
 import os
 import sqlite3
-from datetime import datetime, timedelta
+from datetime import datetime
 from zoneinfo import ZoneInfo
 
 import discord
@@ -10,320 +10,112 @@ from dotenv import load_dotenv
 
 
 # =========================================================
-# CONFIGURARE
+# CONFIG
 # =========================================================
 
 load_dotenv()
 
 TOKEN = os.getenv("DISCORD_TOKEN")
-TIMEZONE_NAME = os.getenv("TIMEZONE", "Europe/Bucharest")
+TIMEZONE = os.getenv("TIMEZONE", "Europe/Bucharest")
+
+TZ = ZoneInfo(TIMEZONE)
 
 if not TOKEN:
-    raise RuntimeError(
-        "DISCORD_TOKEN lipsește din variabilele de mediu."
-    )
+    raise RuntimeError("Lipsește DISCORD_TOKEN din variabilele de mediu.")
 
-try:
-    TZ = ZoneInfo(TIMEZONE_NAME)
-except Exception:
-    TZ = ZoneInfo("Europe/Bucharest")
+
+# Railway: dacă există /data, folosim baza persistentă de acolo.
+# Local: folosim pontaj.db în folderul proiectului.
+if os.path.isdir("/data"):
+    DB_PATH = "/data/pontaj.db"
+else:
+    DB_PATH = "pontaj.db"
 
 
 # =========================================================
 # DATABASE
 # =========================================================
 
-if os.path.isdir("/data"):
-    DB_FILE = "/data/pontaj.db"
-else:
-    DB_FILE = "pontaj.db"
-
-
-# =========================================================
-# BOT
-# =========================================================
-
-intents = discord.Intents.default()
-
-bot = commands.Bot(
-    command_prefix="!",
-    intents=intents
-)
-
-
-# =========================================================
-# DATABASE CONNECTION
-# =========================================================
-
 def get_db():
-    conn = sqlite3.connect(DB_FILE)
+    conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
     return conn
 
 
-# =========================================================
-# DATABASE MIGRATION
-# =========================================================
+def now_local():
+    return datetime.now(TZ)
+
+
+def now_iso():
+    return now_local().isoformat()
+
+
+def format_time(iso_string):
+    dt = datetime.fromisoformat(iso_string)
+    return dt.astimezone(TZ).strftime("%H:%M")
+
+
+def format_duration(start_iso, end_iso):
+    start = datetime.fromisoformat(start_iso)
+    end = datetime.fromisoformat(end_iso)
+
+    seconds = int((end - start).total_seconds())
+
+    if seconds < 0:
+        seconds = 0
+
+    hours = seconds // 3600
+    minutes = (seconds % 3600) // 60
+
+    return f"{hours}h {minutes:02d}m"
+
 
 def migrate_database(conn):
+    cursor = conn.cursor()
 
-    cur = conn.cursor()
-
-    # =====================================================
+    # -----------------------------------------------------
     # SETTINGS
-    # =====================================================
+    # -----------------------------------------------------
 
-    cur.execute("""
-        SELECT name
-        FROM sqlite_master
-        WHERE type = 'table'
-          AND name = 'settings'
-    """)
-
-    settings_exists = cur.fetchone()
-
-    if settings_exists:
-
-        cur.execute(
-            "PRAGMA table_info(settings)"
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS settings (
+            key TEXT PRIMARY KEY,
+            value TEXT
         )
-
-        columns = cur.fetchall()
-
-        column_names = [
-            column["name"]
-            for column in columns
-        ]
-
-        if "key" not in column_names:
-
-            print(
-                "Baza de date veche pentru settings a fost detectată."
-            )
-
-            cur.execute("""
-                ALTER TABLE settings
-                RENAME TO settings_old
-            """)
-
-            cur.execute("""
-                CREATE TABLE settings (
-                    key TEXT PRIMARY KEY,
-                    value TEXT
-                )
-            """)
-
-            cur.execute("""
-                PRAGMA table_info(settings_old)
-            """)
-
-            old_columns = cur.fetchall()
-
-            old_column_names = [
-                column["name"]
-                for column in old_columns
-            ]
-
-            if (
-                "name" in old_column_names
-                and "value" in old_column_names
-            ):
-
-                try:
-
-                    cur.execute("""
-                        INSERT OR IGNORE INTO settings (
-                            key,
-                            value
-                        )
-                        SELECT
-                            name,
-                            value
-                        FROM settings_old
-                    """)
-
-                except Exception as e:
-
-                    print(
-                        f"Nu am putut migra setările vechi: {e}"
-                    )
-
-            elif (
-                "setting" in old_column_names
-                and "value" in old_column_names
-            ):
-
-                try:
-
-                    cur.execute("""
-                        INSERT OR IGNORE INTO settings (
-                            key,
-                            value
-                        )
-                        SELECT
-                            setting,
-                            value
-                        FROM settings_old
-                    """)
-
-                except Exception as e:
-
-                    print(
-                        f"Nu am putut migra setările vechi: {e}"
-                    )
-
-            cur.execute("""
-                DROP TABLE settings_old
-            """)
-
-            print(
-                "Tabelul settings a fost migrat."
-            )
-
-    # =====================================================
-    # ATTENDANCE
-    # =====================================================
-
-    cur.execute("""
-        SELECT name
-        FROM sqlite_master
-        WHERE type = 'table'
-          AND name = 'attendance'
     """)
 
-    attendance_exists = cur.fetchone()
+    # -----------------------------------------------------
+    # ATTENDANCE
+    # -----------------------------------------------------
+
+    cursor.execute("""
+        SELECT name
+        FROM sqlite_master
+        WHERE type='table'
+        AND name='attendance'
+    """)
+
+    attendance_exists = cursor.fetchone()
 
     if attendance_exists:
+        cursor.execute("PRAGMA table_info(attendance)")
+        columns = {row["name"] for row in cursor.fetchall()}
 
-        cur.execute(
-            "PRAGMA table_info(attendance)"
-        )
-
-        columns = cur.fetchall()
-
-        column_names = [
-            column["name"]
-            for column in columns
-        ]
-
-        required_columns = [
+        required = {
             "id",
             "session_id",
             "user_id",
             "display_name",
             "avatar_url",
             "started_at"
-        ]
+        }
 
-        attendance_is_correct = all(
-            column in column_names
-            for column in required_columns
-        )
+        if not required.issubset(columns):
+            print("Tabelul attendance este vechi. Se reconstruiește...")
 
-        if not attendance_is_correct:
+            cursor.execute("DROP TABLE attendance")
 
-            print(
-                "Baza de date veche pentru attendance a fost detectată."
-            )
-
-            cur.execute("""
-                ALTER TABLE attendance
-                RENAME TO attendance_old
-            """)
-
-            cur.execute("""
-                CREATE TABLE attendance (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    session_id INTEGER NOT NULL,
-                    user_id INTEGER NOT NULL,
-                    display_name TEXT NOT NULL,
-                    avatar_url TEXT,
-                    started_at TEXT NOT NULL,
-                    UNIQUE(session_id, user_id)
-                )
-            """)
-
-            cur.execute("""
-                DROP TABLE attendance_old
-            """)
-
-            print(
-                "Tabelul attendance a fost recreat."
-            )
-
-    # =====================================================
-    # ATTENDANCE HISTORY
-    # =====================================================
-
-    cur.execute("""
-        SELECT name
-        FROM sqlite_master
-        WHERE type = 'table'
-          AND name = 'attendance_history'
-    """)
-
-    history_exists = cur.fetchone()
-
-    if history_exists:
-
-        cur.execute(
-            "PRAGMA table_info(attendance_history)"
-        )
-
-        columns = cur.fetchall()
-
-        column_names = [
-            column["name"]
-            for column in columns
-        ]
-
-        required_history_columns = [
-            "id",
-            "session_id",
-            "user_id",
-            "display_name",
-            "avatar_url",
-            "started_at",
-            "ended_at"
-        ]
-
-        history_is_correct = all(
-            column in column_names
-            for column in required_history_columns
-        )
-
-        if not history_is_correct:
-
-            print(
-                "Structura attendance_history nu este compatibilă."
-            )
-
-            cur.execute("""
-                DROP TABLE attendance_history
-            """)
-
-            print(
-                "attendance_history a fost recreat."
-            )
-
-
-# =========================================================
-# INITIALIZARE DATABASE
-# =========================================================
-
-def init_db():
-
-    conn = get_db()
-
-    migrate_database(conn)
-
-    cur = conn.cursor()
-
-    # =====================================================
-    # PREZENȚE ACTIVE
-    # =====================================================
-
-    cur.execute("""
+    cursor.execute("""
         CREATE TABLE IF NOT EXISTS attendance (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             session_id INTEGER NOT NULL,
@@ -335,11 +127,39 @@ def init_db():
         )
     """)
 
-    # =====================================================
-    # ISTORIC
-    # =====================================================
+    # -----------------------------------------------------
+    # ATTENDANCE HISTORY
+    # -----------------------------------------------------
 
-    cur.execute("""
+    cursor.execute("""
+        SELECT name
+        FROM sqlite_master
+        WHERE type='table'
+        AND name='attendance_history'
+    """)
+
+    history_exists = cursor.fetchone()
+
+    if history_exists:
+        cursor.execute("PRAGMA table_info(attendance_history)")
+        columns = {row["name"] for row in cursor.fetchall()}
+
+        required = {
+            "id",
+            "session_id",
+            "user_id",
+            "display_name",
+            "avatar_url",
+            "started_at",
+            "ended_at"
+        }
+
+        if not required.issubset(columns):
+            print("Tabelul attendance_history este vechi. Se reconstruiește...")
+
+            cursor.execute("DROP TABLE attendance_history")
+
+    cursor.execute("""
         CREATE TABLE IF NOT EXISTS attendance_history (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             session_id INTEGER NOT NULL,
@@ -351,96 +171,55 @@ def init_db():
         )
     """)
 
-    # =====================================================
-    # SETTINGS
-    # =====================================================
+    conn.commit()
 
-    cur.execute("""
-        CREATE TABLE IF NOT EXISTS settings (
-            key TEXT PRIMARY KEY,
-            value TEXT
-        )
+
+def init_db():
+    conn = get_db()
+    migrate_database(conn)
+
+    cursor = conn.cursor()
+
+    cursor.execute("""
+        INSERT OR IGNORE INTO settings (key, value)
+        VALUES ('session_id', '0')
     """)
 
-    # =====================================================
-    # DEFAULT SETTINGS
-    # =====================================================
-
-    cur.execute("""
-        INSERT OR IGNORE INTO settings (
-            key,
-            value
-        )
-        VALUES (
-            'session_id',
-            '0'
-        )
+    cursor.execute("""
+        INSERT OR IGNORE INTO settings (key, value)
+        VALUES ('session_active', '0')
     """)
 
-    cur.execute("""
-        INSERT OR IGNORE INTO settings (
-            key,
-            value
-        )
-        VALUES (
-            'session_active',
-            '0'
-        )
+    cursor.execute("""
+        INSERT OR IGNORE INTO settings (key, value)
+        VALUES ('panel_channel_id', '')
     """)
 
-    cur.execute("""
-        INSERT OR IGNORE INTO settings (
-            key,
-            value
-        )
-        VALUES (
-            'panel_channel_id',
-            ''
-        )
-    """)
-
-    cur.execute("""
-        INSERT OR IGNORE INTO settings (
-            key,
-            value
-        )
-        VALUES (
-            'panel_message_id',
-            ''
-        )
+    cursor.execute("""
+        INSERT OR IGNORE INTO settings (key, value)
+        VALUES ('panel_message_id', '')
     """)
 
     conn.commit()
     conn.close()
 
-    print(
-        "Database inițializată cu succes."
-    )
+    print("Database inițializată cu succes.")
 
 
 # =========================================================
-# SETTINGS
+# SETTINGS HELPERS
 # =========================================================
 
-def get_setting(
-    key,
-    default=None
-):
-
+def get_setting(key, default=None):
     conn = get_db()
-    cur = conn.cursor()
+    cursor = conn.cursor()
 
-    cur.execute(
-        """
-        SELECT value
-        FROM settings
-        WHERE key = ?
-        """,
+    cursor.execute(
+        "SELECT value FROM settings WHERE key = ?",
         (key,)
     )
 
-    row = cur.fetchone()
-
+    row = cursor.fetchone()
     conn.close()
 
     if row is None:
@@ -449,234 +228,85 @@ def get_setting(
     return row["value"]
 
 
-def set_setting(
-    key,
-    value
-):
-
+def set_setting(key, value):
     conn = get_db()
-    cur = conn.cursor()
+    cursor = conn.cursor()
 
-    cur.execute("""
-        INSERT INTO settings (
-            key,
-            value
-        )
-        VALUES (
-            ?,
-            ?
-        )
+    cursor.execute("""
+        INSERT INTO settings (key, value)
+        VALUES (?, ?)
         ON CONFLICT(key)
-        DO UPDATE SET
-            value = excluded.value
-    """, (
-        key,
-        str(value)
-    ))
+        DO UPDATE SET value = excluded.value
+    """, (key, str(value)))
 
     conn.commit()
     conn.close()
 
 
-# =========================================================
-# SESSION
-# =========================================================
-
 def get_current_session_id():
-
-    return int(
-        get_setting(
-            "session_id",
-            "0"
-        )
-    )
+    return int(get_setting("session_id", "0"))
 
 
 def is_session_active():
-
-    return (
-        get_setting(
-            "session_active",
-            "0"
-        ) == "1"
-    )
+    return get_setting("session_active", "0") == "1"
 
 
 # =========================================================
-# TIME
+# DISCORD BOT
 # =========================================================
 
-def now_local():
+intents = discord.Intents.default()
 
-    return datetime.now(TZ)
-
-
-def parse_datetime(value):
-
-    try:
-
-        dt = datetime.fromisoformat(value)
-
-        if dt.tzinfo is None:
-
-            dt = dt.replace(
-                tzinfo=TZ
-            )
-
-        return dt.astimezone(TZ)
-
-    except Exception:
-
-        return None
-
-
-def format_time(value):
-
-    dt = parse_datetime(value)
-
-    if dt is None:
-
-        return "--:--"
-
-    return dt.strftime(
-        "%H:%M"
-    )
-
-
-def format_date(value):
-
-    dt = parse_datetime(value)
-
-    if dt is None:
-
-        return None
-
-    return dt.strftime(
-        "%d.%m.%Y"
-    )
-
-
-def calculate_duration(
-    started_at,
-    ended_at
-):
-
-    start = parse_datetime(
-        started_at
-    )
-
-    end = parse_datetime(
-        ended_at
-    )
-
-    if start is None or end is None:
-
-        return timedelta(0)
-
-    duration = end - start
-
-    if duration.total_seconds() < 0:
-
-        return timedelta(0)
-
-    return duration
-
-
-def format_duration(
-    duration
-):
-
-    total_seconds = int(
-        duration.total_seconds()
-    )
-
-    hours = total_seconds // 3600
-
-    minutes = (
-        total_seconds % 3600
-    ) // 60
-
-    if hours > 0:
-
-        return f"{hours}h {minutes}m"
-
-    return f"{minutes}m"
+bot = commands.Bot(
+    command_prefix="!",
+    intents=intents
+)
 
 
 # =========================================================
-# ACTIVE USERS
+# PANEL EMBED
 # =========================================================
 
-def get_present_users():
-
+def create_panel_embed(session_finished=False):
     session_id = get_current_session_id()
 
     conn = get_db()
-    cur = conn.cursor()
+    cursor = conn.cursor()
 
-    cur.execute("""
-        SELECT *
+    cursor.execute("""
+        SELECT user_id
         FROM attendance
         WHERE session_id = ?
         ORDER BY id ASC
-    """, (
-        session_id,
-    ))
+    """, (session_id,))
 
-    rows = cur.fetchall()
-
+    users = cursor.fetchall()
     conn.close()
 
-    return rows
-
-
-# =========================================================
-# PANEL
-# =========================================================
-
-def create_panel_embed(
-    session_finished=False
-):
-
     if session_finished:
-
-        embed = discord.Embed(
-            title="🔴 PREZENȚĂ",
-            color=discord.Color.red()
-        )
-
+        title = "🔴 PREZENȚĂ"
     else:
+        title = "🟢 PREZENȚĂ"
 
-        embed = discord.Embed(
-            title="🟢 PREZENȚĂ",
-            color=discord.Color.green()
-        )
+    embed = discord.Embed(
+        title=title
+    )
 
-    users = get_present_users()
-
-    if not users:
-
-        embed.add_field(
-            name="👥 Persoane prezente",
-            value="Nimeni nu este prezent.",
-            inline=False
-        )
-
-    else:
-
+    if users:
         lines = []
 
         for user in users:
+            lines.append(f"🟢 <@{user['user_id']}>")
 
-            lines.append(
-                f"🟢 <@{user['user_id']}>"
-            )
+        value = "\n".join(lines)
+    else:
+        value = "Nimeni nu este prezent."
 
-        embed.add_field(
-            name="👥 Persoane prezente",
-            value="\n".join(lines),
-            inline=False
-        )
+    embed.add_field(
+        name="👥 Persoane prezente",
+        value=value,
+        inline=False
+    )
 
     embed.set_footer(
         text="Lista se actualizează automat."
@@ -686,22 +316,43 @@ def create_panel_embed(
 
 
 # =========================================================
-# PRESENCE VIEW
+# UPDATE PANEL
 # =========================================================
 
-class PresenceView(
-    discord.ui.View
-):
+async def update_panel():
+    channel_id = get_setting("panel_channel_id")
+    message_id = get_setting("panel_message_id")
 
-    def __init__(self):
+    if not channel_id or not message_id:
+        return
 
-        super().__init__(
-            timeout=None
+    try:
+        channel = bot.get_channel(int(channel_id))
+
+        if channel is None:
+            channel = await bot.fetch_channel(int(channel_id))
+
+        message = await channel.fetch_message(int(message_id))
+
+        await message.edit(
+            embed=create_panel_embed(
+                session_finished=not is_session_active()
+            ),
+            view=PresenceView() if is_session_active() else None
         )
 
-    # =====================================================
-    # PREZENT
-    # =====================================================
+    except Exception as e:
+        print(f"Eroare la actualizarea panoului: {e}")
+
+
+# =========================================================
+# PRESENCE BUTTONS
+# =========================================================
+
+class PresenceView(discord.ui.View):
+
+    def __init__(self):
+        super().__init__(timeout=None)
 
     @discord.ui.button(
         label="PREZENT",
@@ -714,59 +365,42 @@ class PresenceView(
         interaction: discord.Interaction,
         button: discord.ui.Button
     ):
-
         if not is_session_active():
-
-            await interaction.response.defer(
-                ephemeral=True
-            )
-
+            await interaction.response.defer(ephemeral=True)
             return
 
-        user = interaction.user
-
         session_id = get_current_session_id()
-
-        avatar_url = str(
-            user.display_avatar.url
-        )
+        user_id = interaction.user.id
 
         conn = get_db()
-        cur = conn.cursor()
+        cursor = conn.cursor()
 
-        # =================================================
-        # VERIFICĂM DACĂ ESTE DEJA PREZENT
-        # =================================================
-
-        cur.execute("""
+        # Verificăm dacă persoana este deja prezentă.
+        cursor.execute("""
             SELECT id
             FROM attendance
             WHERE session_id = ?
-              AND user_id = ?
-        """, (
-            session_id,
-            user.id
-        ))
+            AND user_id = ?
+        """, (session_id, user_id))
 
-        existing = cur.fetchone()
+        existing = cursor.fetchone()
 
         if existing:
-
             conn.close()
-
-            await interaction.response.defer(
-                ephemeral=True
-            )
-
+            await interaction.response.defer(ephemeral=True)
             return
 
-        current_time = now_local().isoformat()
+        current_time = now_iso()
 
-        # =================================================
-        # PREZENȚĂ ACTIVĂ
-        # =================================================
+        display_name = interaction.user.display_name
 
-        cur.execute("""
+        avatar_url = None
+
+        if interaction.user.avatar:
+            avatar_url = interaction.user.avatar.url
+
+        # Adăugăm persoana pe panoul activ.
+        cursor.execute("""
             INSERT INTO attendance (
                 session_id,
                 user_id,
@@ -777,17 +411,14 @@ class PresenceView(
             VALUES (?, ?, ?, ?, ?)
         """, (
             session_id,
-            user.id,
-            user.display_name,
+            user_id,
+            display_name,
             avatar_url,
             current_time
         ))
 
-        # =================================================
-        # ISTORIC
-        # =================================================
-
-        cur.execute("""
+        # Deschidem un interval nou în istoric.
+        cursor.execute("""
             INSERT INTO attendance_history (
                 session_id,
                 user_id,
@@ -799,8 +430,8 @@ class PresenceView(
             VALUES (?, ?, ?, ?, ?, NULL)
         """, (
             session_id,
-            user.id,
-            user.display_name,
+            user_id,
+            display_name,
             avatar_url,
             current_time
         ))
@@ -808,19 +439,10 @@ class PresenceView(
         conn.commit()
         conn.close()
 
-        # =================================================
-        # FĂRĂ MESAJ
-        # =================================================
-
-        await interaction.response.defer(
-            ephemeral=True
-        )
+        # Fără mesaj vizibil.
+        await interaction.response.defer(ephemeral=True)
 
         await update_panel()
-
-    # =====================================================
-    # NEPREZENT
-    # =====================================================
 
     @discord.ui.button(
         label="NEPREZENT",
@@ -828,77 +450,53 @@ class PresenceView(
         style=discord.ButtonStyle.danger,
         custom_id="pontaj_plecare"
     )
-    async def plecare(
+    async def neprezent(
         self,
         interaction: discord.Interaction,
         button: discord.ui.Button
     ):
-
         if not is_session_active():
-
-            await interaction.response.defer(
-                ephemeral=True
-            )
-
+            await interaction.response.defer(ephemeral=True)
             return
-
-        user = interaction.user
 
         session_id = get_current_session_id()
+        user_id = interaction.user.id
 
         conn = get_db()
-        cur = conn.cursor()
+        cursor = conn.cursor()
 
-        # =================================================
-        # VERIFICĂM DACĂ ESTE PREZENT
-        # =================================================
-
-        cur.execute("""
-            SELECT *
+        # Verificăm dacă persoana este pe panou.
+        cursor.execute("""
+            SELECT id
             FROM attendance
             WHERE session_id = ?
-              AND user_id = ?
-        """, (
-            session_id,
-            user.id
-        ))
+            AND user_id = ?
+        """, (session_id, user_id))
 
-        existing = cur.fetchone()
+        active = cursor.fetchone()
 
-        if not existing:
-
+        if not active:
             conn.close()
-
-            await interaction.response.defer(
-                ephemeral=True
-            )
-
+            await interaction.response.defer(ephemeral=True)
             return
 
-        current_time = now_local().isoformat()
+        current_time = now_iso()
 
-        # =================================================
-        # ÎNCHIDEM ULTIMA INTRARE
-        # =================================================
-
-        cur.execute("""
+        # Închidem ultimul interval deschis.
+        cursor.execute("""
             SELECT id
             FROM attendance_history
             WHERE session_id = ?
-              AND user_id = ?
-              AND ended_at IS NULL
+            AND user_id = ?
+            AND ended_at IS NULL
             ORDER BY id DESC
             LIMIT 1
-        """, (
-            session_id,
-            user.id
-        ))
+        """, (session_id, user_id))
 
-        history_row = cur.fetchone()
+        history_row = cursor.fetchone()
 
         if history_row:
-
-            cur.execute("""
+            cursor.execute("""
                 UPDATE attendance_history
                 SET ended_at = ?
                 WHERE id = ?
@@ -907,216 +505,84 @@ class PresenceView(
                 history_row["id"]
             ))
 
-        # =================================================
-        # SCOATEM PERSOANA DIN PANOU
-        # =================================================
-
-        cur.execute("""
+        # Scoatem persoana de pe panoul activ.
+        cursor.execute("""
             DELETE FROM attendance
             WHERE session_id = ?
-              AND user_id = ?
+            AND user_id = ?
         """, (
             session_id,
-            user.id
+            user_id
         ))
 
         conn.commit()
         conn.close()
 
-        # =================================================
-        # FĂRĂ MESAJ
-        # =================================================
-
-        await interaction.response.defer(
-            ephemeral=True
-        )
+        # Fără mesaj vizibil.
+        await interaction.response.defer(ephemeral=True)
 
         await update_panel()
 
 
 # =========================================================
-# UPDATE PANEL
-# =========================================================
-
-async def update_panel():
-
-    channel_id = get_setting(
-        "panel_channel_id",
-        ""
-    )
-
-    message_id = get_setting(
-        "panel_message_id",
-        ""
-    )
-
-    if not channel_id or not message_id:
-
-        return
-
-    try:
-
-        channel = bot.get_channel(
-            int(channel_id)
-        )
-
-        if channel is None:
-
-            channel = await bot.fetch_channel(
-                int(channel_id)
-            )
-
-        message = await channel.fetch_message(
-            int(message_id)
-        )
-
-        await message.edit(
-            content=None,
-            embed=create_panel_embed(),
-            view=PresenceView()
-        )
-
-    except discord.NotFound:
-
-        print(
-            "Panoul nu mai există în Discord."
-        )
-
-    except Exception as e:
-
-        print(
-            f"Eroare la actualizarea panoului: {e}"
-        )
-
-
-# =========================================================
-# /setup_prezenta
+# SETUP PREZENTA
 # =========================================================
 
 @bot.tree.command(
     name="setup_prezenta",
-    description=(
-        "Creează panoul de prezență "
-        "și pornește o sesiune nouă."
-    )
+    description="Creează un nou panou de prezență."
 )
-@app_commands.default_permissions(
-    administrator=True
-)
+@app_commands.checks.has_permissions(administrator=True)
 async def setup_prezenta(
     interaction: discord.Interaction
 ):
-
-    if not interaction.user.guild_permissions.administrator:
-
-        await interaction.response.send_message(
-            "❌ Nu ai permisiunea de Administrator.",
-            ephemeral=True
-        )
-
-        return
-
-    await interaction.response.defer(
-        ephemeral=True
-    )
-
-    # =====================================================
-    # ȘTERGEM PANoul VECHI
-    # =====================================================
-
-    old_channel_id = get_setting(
-        "panel_channel_id",
-        ""
-    )
-
-    old_message_id = get_setting(
-        "panel_message_id",
-        ""
-    )
+    # Ștergem vechiul panou, dacă există.
+    old_channel_id = get_setting("panel_channel_id")
+    old_message_id = get_setting("panel_message_id")
 
     if old_channel_id and old_message_id:
-
         try:
+            old_channel = bot.get_channel(int(old_channel_id))
 
-            old_channel = bot.get_channel(
-                int(old_channel_id)
-            )
-
-            if old_channel is None:
-
-                old_channel = await bot.fetch_channel(
-                    int(old_channel_id)
+            if old_channel:
+                old_message = await old_channel.fetch_message(
+                    int(old_message_id)
                 )
 
-            old_message = await old_channel.fetch_message(
-                int(old_message_id)
-            )
+                await old_message.delete()
 
-            await old_message.delete()
+        except Exception:
+            pass
 
-            print(
-                "Panoul vechi a fost șters."
-            )
+    # Noua sesiune/panou.
+    old_session_id = get_current_session_id()
+    new_session_id = old_session_id + 1
 
-        except Exception as e:
+    set_setting("session_id", new_session_id)
+    set_setting("session_active", "1")
 
-            print(
-                f"Nu am putut șterge panoul vechi: {e}"
-            )
-
-    # =====================================================
-    # SESIUNE NOUĂ
-    # =====================================================
-
-    old_session = get_current_session_id()
-
-    new_session = old_session + 1
-
-    set_setting(
-        "session_id",
-        new_session
-    )
-
-    set_setting(
-        "session_active",
-        "1"
-    )
-
-    # =====================================================
-    # CURĂȚĂM LISTA ACTIVĂ A SESIUNII NOI
-    # =====================================================
-
+    # Panoul nou începe gol.
     conn = get_db()
-    cur = conn.cursor()
+    cursor = conn.cursor()
 
-    cur.execute("""
+    cursor.execute("""
         DELETE FROM attendance
         WHERE session_id = ?
-    """, (
-        new_session,
-    ))
+    """, (new_session_id,))
 
     conn.commit()
     conn.close()
 
-    # =====================================================
-    # CREĂM PANELUL
-    # =====================================================
+    view = PresenceView()
 
-    channel = interaction.channel
-
-    message = await channel.send(
+    message = await interaction.channel.send(
         embed=create_panel_embed(),
-        view=PresenceView()
+        view=view
     )
-
-    # =====================================================
-    # SALVĂM PANELUL
-    # =====================================================
 
     set_setting(
         "panel_channel_id",
-        channel.id
+        interaction.channel.id
     )
 
     set_setting(
@@ -1124,401 +590,218 @@ async def setup_prezenta(
         message.id
     )
 
-    print(
-        f"Sesiune nouă: {new_session}"
-    )
-
-    print(
-        f"Canal: {channel.id}"
-    )
-
-    print(
-        f"Mesaj: {message.id}"
-    )
-
-    await interaction.followup.send(
+    await interaction.response.send_message(
         "🟢 Panoul de prezență a fost creat.",
         ephemeral=True
     )
 
 
 # =========================================================
-# /incheie_prezenta
-# =========================================================
-
-@bot.tree.command(
-    name="incheie_prezenta",
-    description="Încheie sesiunea de prezență."
-)
-@app_commands.default_permissions(
-    administrator=True
-)
-async def incheie_prezenta(
-    interaction: discord.Interaction
-):
-
-    if not interaction.user.guild_permissions.administrator:
-
-        await interaction.response.send_message(
-            "❌ Nu ai permisiunea de Administrator.",
-            ephemeral=True
-        )
-
-        return
-
-    if not is_session_active():
-
-        await interaction.response.send_message(
-            "❌ Nu există o sesiune de prezență activă.",
-            ephemeral=True
-        )
-
-        return
-
-    await interaction.response.defer(
-        ephemeral=True
-    )
-
-    set_setting(
-        "session_active",
-        "0"
-    )
-
-    try:
-
-        channel_id = get_setting(
-            "panel_channel_id",
-            ""
-        )
-
-        message_id = get_setting(
-            "panel_message_id",
-            ""
-        )
-
-        if channel_id and message_id:
-
-            channel = bot.get_channel(
-                int(channel_id)
-            )
-
-            if channel is None:
-
-                channel = await bot.fetch_channel(
-                    int(channel_id)
-                )
-
-            panel_message = await channel.fetch_message(
-                int(message_id)
-            )
-
-            await panel_message.edit(
-                embed=create_panel_embed(
-                    session_finished=True
-                ),
-                view=None
-            )
-
-    except Exception as e:
-
-        print(
-            f"Eroare la închiderea panoului: {e}"
-        )
-
-    await interaction.followup.send(
-        "🔴 Prezența a fost încheiată.",
-        ephemeral=True
-    )
-
-
-# =========================================================
-# /prezenta
+# PREZENTA
 # =========================================================
 
 @bot.tree.command(
     name="prezenta",
-    description="Vezi dacă ești prezent în sesiunea curentă."
+    description="Verifică dacă ești prezent."
 )
 async def prezenta(
     interaction: discord.Interaction
 ):
-
     if not is_session_active():
-
         await interaction.response.send_message(
-            "❌ Nu există o sesiune activă.",
+            "🔴 Nu există un panou de prezență activ.",
             ephemeral=True
         )
-
         return
 
     session_id = get_current_session_id()
+    user_id = interaction.user.id
 
     conn = get_db()
-    cur = conn.cursor()
+    cursor = conn.cursor()
 
-    cur.execute("""
-        SELECT *
+    cursor.execute("""
+        SELECT started_at
         FROM attendance
         WHERE session_id = ?
-          AND user_id = ?
+        AND user_id = ?
     """, (
         session_id,
-        interaction.user.id
+        user_id
     ))
 
-    row = cur.fetchone()
-
+    row = cursor.fetchone()
     conn.close()
 
     if not row:
-
         await interaction.response.send_message(
-            "❌ Nu ești trecut ca prezent.",
+            "🔴 Nu ești prezent.",
             ephemeral=True
         )
-
         return
 
     await interaction.response.send_message(
-        (
-            "🟢 **Ești prezent.**\n"
-            f"🕐 Ai intrat la **{format_time(row['started_at'])}**."
-        ),
+        f"🟢 Ești prezent de la {format_time(row['started_at'])}.",
         ephemeral=True
     )
 
 
 # =========================================================
-# /istoric_prezente
+# INCHEIE PREZENTA
 # =========================================================
 
-@app_commands.describe(
-    data="Data dorită în format ZZ.LL.AAAA. Dacă este goală, se folosește ziua de azi."
+@bot.tree.command(
+    name="incheie_prezenta",
+    description="Închide panoul actual de prezență."
 )
+@app_commands.checks.has_permissions(administrator=True)
+async def incheie_prezenta(
+    interaction: discord.Interaction
+):
+    if not is_session_active():
+        await interaction.response.send_message(
+            "🔴 Nu există un panou activ.",
+            ephemeral=True
+        )
+        return
+
+    set_setting("session_active", "0")
+
+    await update_panel()
+
+    await interaction.response.send_message(
+        "🔴 Panoul de prezență a fost închis.",
+        ephemeral=True
+    )
+
+
+# =========================================================
+# ISTORIC PREZENTE
+# =========================================================
+
 @bot.tree.command(
     name="istoric_prezente",
-    description="Afișează istoricul prezenței pentru o anumită zi."
+    description="Arată prezențele de pe ultimul panou."
 )
-@app_commands.default_permissions(
-    administrator=True
-)
+@app_commands.checks.has_permissions(administrator=True)
 async def istoric_prezente(
-    interaction: discord.Interaction,
-    data: str | None = None
+    interaction: discord.Interaction
 ):
+    # FOARTE IMPORTANT:
+    # Nu mai folosim data.
+    # Nu mai căutăm în toate sesiunile.
+    # Luăm STRICT ultimul session_id.
+    session_id = get_current_session_id()
 
-    if not interaction.user.guild_permissions.administrator:
-
+    if session_id <= 0:
         await interaction.response.send_message(
-            "❌ Nu ai permisiunea de Administrator.",
+            "🔴 Nu există încă niciun panou de prezență.",
             ephemeral=True
         )
-
         return
-
-    # =====================================================
-    # DATA
-    # =====================================================
-
-    if data:
-
-        try:
-
-            selected_date = datetime.strptime(
-                data,
-                "%d.%m.%Y"
-            ).date()
-
-        except ValueError:
-
-            await interaction.response.send_message(
-                "❌ Data trebuie scrisă în formatul **ZZ.LL.AAAA**.\n"
-                "Exemplu: `/istoric_prezente data:04.10.2026`",
-                ephemeral=True
-            )
-
-            return
-
-    else:
-
-        selected_date = now_local().date()
-
-    await interaction.response.defer(
-        ephemeral=True
-    )
-
-    # =====================================================
-    # CĂUTĂM TOATE INTRĂRILE ÎNCHISE
-    # DIN ZIUA ALEASĂ
-    # =====================================================
 
     conn = get_db()
-    cur = conn.cursor()
+    cursor = conn.cursor()
 
-    cur.execute("""
-        SELECT *
+    # Luăm doar intervalele ÎNCHISE din ultimul panou.
+    cursor.execute("""
+        SELECT
+            user_id,
+            display_name,
+            started_at,
+            ended_at
         FROM attendance_history
-        WHERE ended_at IS NOT NULL
-        ORDER BY id ASC
-    """)
+        WHERE session_id = ?
+        AND ended_at IS NOT NULL
+        ORDER BY user_id, started_at
+    """, (session_id,))
 
-    all_rows = cur.fetchall()
-
+    rows = cursor.fetchall()
     conn.close()
 
-    rows = []
-
-    for row in all_rows:
-
-        started = parse_datetime(
-            row["started_at"]
-        )
-
-        ended = parse_datetime(
-            row["ended_at"]
-        )
-
-        if started is None or ended is None:
-            continue
-
-        # =================================================
-        # FOLOSIM DATA IEȘIRII
-        #
-        # Pentru o prezență normală în aceeași zi,
-        # aceasta este ziua pontajului.
-        # =================================================
-
-        if ended.date() != selected_date:
-            continue
-
-        rows.append(row)
-
-    # =====================================================
-    # NU EXISTĂ DATE
-    # =====================================================
-
     if not rows:
-
-        await interaction.followup.send(
-            (
-                "📋 **ISTORIC PREZENȚĂ**\n"
-                f"📅 {selected_date.strftime('%d.%m.%Y')}\n\n"
-                "Nu există prezențe încheiate pentru această zi."
-            ),
+        await interaction.response.send_message(
+            "📋 Nu există prezențe înregistrate pe acest panou.",
             ephemeral=True
         )
-
         return
 
-    # =====================================================
-    # GRUPARE DUPĂ PERSOANĂ
-    # =====================================================
-
-    grouped = {}
+    # Grupăm persoanele.
+    users = {}
 
     for row in rows:
-
         user_id = row["user_id"]
 
-        if user_id not in grouped:
-
-            grouped[user_id] = {
+        if user_id not in users:
+            users[user_id] = {
                 "display_name": row["display_name"],
-                "user_id": user_id,
-                "periods": [],
-                "total": timedelta(0)
+                "intervals": [],
+                "total_seconds": 0
             }
 
-        grouped[user_id]["periods"].append(
+        start = datetime.fromisoformat(row["started_at"])
+        end = datetime.fromisoformat(row["ended_at"])
+
+        seconds = int(
+            (end - start).total_seconds()
+        )
+
+        if seconds < 0:
+            seconds = 0
+
+        users[user_id]["intervals"].append(
             (
-                row["started_at"],
-                row["ended_at"]
+                format_time(row["started_at"]),
+                format_time(row["ended_at"])
             )
         )
 
-        grouped[user_id]["total"] += (
-            calculate_duration(
-                row["started_at"],
-                row["ended_at"]
-            )
-        )
+        users[user_id]["total_seconds"] += seconds
 
-    # =====================================================
-    # EMBED
-    # =====================================================
-
-    embeds = []
-
-    current_embed = discord.Embed(
-        title="📋 ISTORIC PREZENȚĂ",
-        description=(
-            f"📅 {selected_date.strftime('%d.%m.%Y')}"
-        ),
-        color=discord.Color.blue()
+    embed = discord.Embed(
+        title="📋 ISTORIC PREZENȚE"
     )
 
-    for index, person in enumerate(
-        grouped.values(),
-        start=1
-    ):
+    embed.description = (
+        f"Prezențele înregistrate pe panoul #{session_id}."
+    )
+
+    for user_id, data in users.items():
 
         lines = []
 
-        for started_at, ended_at in person["periods"]:
-
+        for start_time, end_time in data["intervals"]:
             lines.append(
-                f"`{format_time(started_at)} → {format_time(ended_at)}`"
+                f"🕐 {start_time} → {end_time}"
             )
 
-        total_text = format_duration(
-            person["total"]
+        total_seconds = data["total_seconds"]
+
+        total_hours = total_seconds // 3600
+        total_minutes = (total_seconds % 3600) // 60
+
+        lines.append("")
+        lines.append(
+            f"**TOTAL: {total_hours}h {total_minutes:02d}m**"
         )
 
-        value = (
-            "\n".join(lines)
-            + "\n"
-            + f"**TOTAL: {total_text}**"
-        )
+        # Folosim mențiunea Discord corect.
+        field_name = f"<@{user_id}>"
 
-        # =================================================
-        # LIMITA DISCORD
-        # =================================================
-
-        if len(current_embed.fields) >= 22:
-
-            embeds.append(
-                current_embed
-            )
-
-            current_embed = discord.Embed(
-                title="📋 ISTORIC PREZENȚĂ — continuare",
-                description=(
-                    f"📅 {selected_date.strftime('%d.%m.%Y')}"
-                ),
-                color=discord.Color.blue()
-            )
-
-        current_embed.add_field(
-            name=f"{index}. <@{person['user_id']}>",
-            value=value,
+        embed.add_field(
+            name=field_name,
+            value="\n".join(lines),
             inline=False
         )
 
-    embeds.append(
-        current_embed
+    embed.set_footer(
+        text="Istoric pentru ultimul panou de prezență."
     )
 
-    # =====================================================
-    # TRIMITEM ISTORICUL
-    # =====================================================
-
-    for embed in embeds:
-
-        await interaction.followup.send(
-            embed=embed,
-            ephemeral=True
-        )
+    await interaction.response.send_message(
+        embed=embed,
+        ephemeral=True
+    )
 
 
 # =========================================================
@@ -1530,32 +813,30 @@ async def on_app_command_error(
     interaction: discord.Interaction,
     error: app_commands.AppCommandError
 ):
+    if isinstance(
+        error,
+        app_commands.errors.MissingPermissions
+    ):
+        message = "🔴 Nu ai permisiunea necesară pentru această comandă."
 
-    print(
-        f"Eroare comandă Discord: {error}"
-    )
+    else:
+        print(f"Eroare comandă: {error}")
+        message = "🔴 A apărut o eroare."
 
     try:
-
         if interaction.response.is_done():
-
             await interaction.followup.send(
-                "❌ A apărut o eroare la executarea comenzii.",
+                message,
                 ephemeral=True
             )
-
         else:
-
             await interaction.response.send_message(
-                "❌ A apărut o eroare la executarea comenzii.",
+                message,
                 ephemeral=True
             )
 
-    except Exception as e:
-
-        print(
-            f"Nu am putut trimite mesajul de eroare: {e}"
-        )
+    except Exception:
+        pass
 
 
 # =========================================================
@@ -1564,25 +845,11 @@ async def on_app_command_error(
 
 @bot.event
 async def on_ready():
-
-    print(
-        f"Bot conectat ca {bot.user}"
-    )
-
-    print(
-        f"Timezone: {TIMEZONE_NAME}"
-    )
-
-    print(
-        f"Database: {DB_FILE}"
-    )
-
-    bot.add_view(
-        PresenceView()
-    )
+    print(f"Bot conectat ca {bot.user}")
+    print(f"Timezone: {TIMEZONE}")
+    print(f"Database: {DB_PATH}")
 
     try:
-
         synced = await bot.tree.sync()
 
         print(
@@ -1590,7 +857,6 @@ async def on_ready():
         )
 
     except Exception as e:
-
         print(
             f"Eroare la sincronizarea comenzilor: {e}"
         )
@@ -1601,5 +867,7 @@ async def on_ready():
 # =========================================================
 
 init_db()
+
+bot.add_view(PresenceView())
 
 bot.run(TOKEN)
