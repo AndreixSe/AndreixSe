@@ -1822,7 +1822,6 @@ async def istoric_patrule(
                 f"🕐 {patrol['patrol_time'] or '-'}\n"
                 f"🚗 Auto: {patrol['cars_count'] or 0}\n"
                 f"👤 Persoane: {patrol['people_count'] or 0}\n"
-                ```python
 f"🎨 {patrol['color'] or '-'}"
             ),
             inline=False
