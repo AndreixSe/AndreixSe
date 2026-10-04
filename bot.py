@@ -138,14 +138,157 @@ def migrate_database():
 
     # -----------------------------------------------------
     # SETTINGS
+    # MIGRARE AUTOMATĂ DIN VECHIUL FORMAT
     # -----------------------------------------------------
 
     cur.execute("""
-        CREATE TABLE IF NOT EXISTS settings (
-            key TEXT PRIMARY KEY,
-            value TEXT
-        )
+        SELECT name
+        FROM sqlite_master
+        WHERE type = 'table'
+        AND name = 'settings'
     """)
+
+    settings_exists = cur.fetchone() is not None
+
+    if not settings_exists:
+
+        # Nu există deloc tabelul.
+        # Îl creăm direct în formatul nou.
+
+        cur.execute("""
+            CREATE TABLE settings (
+                key TEXT PRIMARY KEY,
+                value TEXT
+            )
+        """)
+
+        print("✅ Tabelul settings a fost creat.")
+
+    else:
+
+        # Verificăm structura tabelului existent.
+
+        cur.execute("PRAGMA table_info(settings)")
+
+        settings_columns = [
+            row["name"]
+            for row in cur.fetchall()
+        ]
+
+        # Dacă NU există coloana key,
+        # înseamnă că avem vechiul tabel:
+        #
+        # guild_id
+        # report_channel_id
+        #
+        # Îl migrăm automat.
+
+        if "key" not in settings_columns:
+
+            print(
+                "⚠️ A fost detectat vechiul tabel settings."
+            )
+
+            # Alegem un nume de backup care nu există deja.
+
+            backup_table = "settings_old"
+            counter = 1
+
+            while True:
+
+                cur.execute("""
+                    SELECT name
+                    FROM sqlite_master
+                    WHERE type = 'table'
+                    AND name = ?
+                """, (backup_table,))
+
+                if cur.fetchone() is None:
+                    break
+
+                backup_table = f"settings_old_{counter}"
+                counter += 1
+
+            # Păstrăm tabelul vechi ca backup.
+
+            cur.execute(
+                f'ALTER TABLE settings RENAME TO "{backup_table}"'
+            )
+
+            print(
+                f"✅ Vechiul settings a fost păstrat ca "
+                f"{backup_table}."
+            )
+
+            # Creăm noul tabel.
+
+            cur.execute("""
+                CREATE TABLE settings (
+                    key TEXT PRIMARY KEY,
+                    value TEXT
+                )
+            """)
+
+            # Verificăm ce coloane avea vechiul tabel.
+
+            cur.execute(
+                f'PRAGMA table_info("{backup_table}")'
+            )
+
+            old_settings_columns = [
+                row["name"]
+                for row in cur.fetchall()
+            ]
+
+            # Dacă vechiul tabel avea report_channel_id,
+            # îl mutăm în noul sistem pentru pontaj.
+
+            if "report_channel_id" in old_settings_columns:
+
+                cur.execute(
+                    f'''
+                    SELECT report_channel_id
+                    FROM "{backup_table}"
+                    LIMIT 1
+                    '''
+                )
+
+                old_report_channel = cur.fetchone()
+
+                if (
+                    old_report_channel
+                    and old_report_channel["report_channel_id"]
+                ):
+
+                    cur.execute("""
+                        INSERT OR REPLACE INTO settings(
+                            key,
+                            value
+                        )
+                        VALUES (?, ?)
+                    """, (
+                        "attendance_panel_channel_id",
+                        str(
+                            old_report_channel[
+                                "report_channel_id"
+                            ]
+                        )
+                    ))
+
+                    print(
+                        "✅ report_channel_id a fost migrat "
+                        "în attendance_panel_channel_id."
+                    )
+
+            print(
+                "✅ Tabelul settings a fost migrat automat."
+            )
+
+        else:
+
+            print(
+                "✅ Tabelul settings este deja în format nou."
+            )
 
     # -----------------------------------------------------
     # ATTENDANCE
@@ -1075,10 +1218,6 @@ class DonationItemView(discord.ui.View):
         button: discord.ui.Button
     ):
 
-        # -------------------------------------------------
-        # DOAR LIDER / CO-LIDER / DISCORD MOD
-        # -------------------------------------------------
-
         if not has_donation_full_access(interaction):
 
             await interaction.response.send_message(
@@ -1171,10 +1310,6 @@ class DonationItemView(discord.ui.View):
         interaction: discord.Interaction,
         button: discord.ui.Button
     ):
-
-        # -------------------------------------------------
-        # DOAR LIDER / CO-LIDER / DISCORD MOD
-        # -------------------------------------------------
 
         if not has_donation_full_access(interaction):
 
@@ -1822,7 +1957,7 @@ async def istoric_patrule(
                 f"🕐 {patrol['patrol_time'] or '-'}\n"
                 f"🚗 Auto: {patrol['cars_count'] or 0}\n"
                 f"👤 Persoane: {patrol['people_count'] or 0}\n"
-f"🎨 {patrol['color'] or '-'}"
+                f"🎨 {patrol['color'] or '-'}"
             ),
             inline=False
         )
@@ -2149,23 +2284,28 @@ async def on_app_command_error(
     interaction: discord.Interaction,
     error: app_commands.AppCommandError
 ):
+
     if isinstance(error, app_commands.CheckFailure):
-        command_name = ''
+
+        command_name = ""
 
         if interaction.command:
             command_name = interaction.command.name
 
-        if command_name == 'donatie':
+        if command_name == "donatie":
             message = donation_create_access_message()
         else:
             message = donation_full_access_message()
 
         if interaction.response.is_done():
+
             await interaction.followup.send(
                 message,
                 ephemeral=True
             )
+
         else:
+
             await interaction.response.send_message(
                 message,
                 ephemeral=True
@@ -2173,13 +2313,17 @@ async def on_app_command_error(
 
         return
 
-    print(f'❌ Eroare slash command: {error}')
+    print(
+        f"❌ Eroare slash command: {error}"
+    )
 
 
 # =========================================================
 # PORNIRE BOT
 # =========================================================
 
-if __name__ == '__main__':
+if __name__ == "__main__":
+
     migrate_database()
+
     bot.run(TOKEN)
