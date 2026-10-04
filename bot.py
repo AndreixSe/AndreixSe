@@ -70,7 +70,7 @@ def migrate_database(conn):
     cur = conn.cursor()
 
     # =====================================================
-    # MIGRARE SETTINGS
+    # SETTINGS
     # =====================================================
 
     cur.execute("""
@@ -99,10 +99,6 @@ def migrate_database(conn):
 
             print(
                 "Baza de date veche pentru settings a fost detectată."
-            )
-
-            print(
-                "Se reconstruiește tabelul settings..."
             )
 
             cur.execute("""
@@ -146,10 +142,6 @@ def migrate_database(conn):
                         FROM settings_old
                     """)
 
-                    print(
-                        "Setările vechi au fost migrate."
-                    )
-
                 except Exception as e:
 
                     print(
@@ -174,21 +166,11 @@ def migrate_database(conn):
                         FROM settings_old
                     """)
 
-                    print(
-                        "Setările vechi au fost migrate."
-                    )
-
                 except Exception as e:
 
                     print(
                         f"Nu am putut migra setările vechi: {e}"
                     )
-
-            else:
-
-                print(
-                    "Structura veche settings nu poate fi migrată."
-                )
 
             cur.execute("""
                 DROP TABLE settings_old
@@ -199,7 +181,7 @@ def migrate_database(conn):
             )
 
     # =====================================================
-    # MIGRARE ATTENDANCE
+    # ATTENDANCE
     # =====================================================
 
     cur.execute("""
@@ -244,10 +226,6 @@ def migrate_database(conn):
                 "Baza de date veche pentru attendance a fost detectată."
             )
 
-            print(
-                "Se reconstruiește tabelul attendance..."
-            )
-
             cur.execute("""
                 ALTER TABLE attendance
                 RENAME TO attendance_old
@@ -265,25 +243,16 @@ def migrate_database(conn):
                 )
             """)
 
-            print(
-                "Tabelul attendance nou a fost creat."
-            )
-
-            print(
-                "Datele vechi de attendance nu sunt compatibile "
-                "cu structura nouă și vor fi eliminate."
-            )
-
             cur.execute("""
                 DROP TABLE attendance_old
             """)
 
             print(
-                "Tabelul attendance vechi a fost eliminat."
+                "Tabelul attendance a fost recreat."
             )
 
     # =====================================================
-    # MIGRARE ATTENDANCE HISTORY
+    # ATTENDANCE HISTORY
     # =====================================================
 
     cur.execute("""
@@ -326,7 +295,7 @@ def migrate_database(conn):
         if not history_is_correct:
 
             print(
-                "Structura veche pentru attendance_history a fost detectată."
+                "Structura attendance_history nu este compatibilă."
             )
 
             cur.execute("""
@@ -334,7 +303,7 @@ def migrate_database(conn):
             """)
 
             print(
-                "Tabelul attendance_history vechi a fost eliminat."
+                "attendance_history a fost recreat."
             )
 
 
@@ -574,6 +543,19 @@ def format_time(value):
     )
 
 
+def format_date(value):
+
+    dt = parse_datetime(value)
+
+    if dt is None:
+
+        return None
+
+    return dt.strftime(
+        "%d.%m.%Y"
+    )
+
+
 def calculate_duration(
     started_at,
     ended_at
@@ -587,13 +569,9 @@ def calculate_duration(
         ended_at
     )
 
-    if start is None:
+    if start is None or end is None:
 
         return timedelta(0)
-
-    if end is None:
-
-        end = now_local()
 
     duration = end - start
 
@@ -653,7 +631,7 @@ def get_present_users():
 
 
 # =========================================================
-# PANEL EMBED
+# PANEL
 # =========================================================
 
 def create_panel_embed(
@@ -708,77 +686,6 @@ def create_panel_embed(
 
 
 # =========================================================
-# HISTORY
-# =========================================================
-
-def get_history():
-
-    session_id = get_current_session_id()
-
-    conn = get_db()
-    cur = conn.cursor()
-
-    cur.execute("""
-        SELECT *
-        FROM attendance_history
-        WHERE session_id = ?
-        ORDER BY id ASC
-    """, (
-        session_id,
-    ))
-
-    rows = cur.fetchall()
-
-    conn.close()
-
-    return rows
-
-
-# =========================================================
-# GROUP HISTORY BY USER
-# =========================================================
-
-def group_history(rows):
-
-    grouped = {}
-
-    for row in rows:
-
-        user_id = row["user_id"]
-
-        if user_id not in grouped:
-
-            grouped[user_id] = {
-                "user_id": user_id,
-                "display_name": row["display_name"],
-                "avatar_url": row["avatar_url"],
-                "periods": [],
-                "total": timedelta(0)
-            }
-
-        start = row["started_at"]
-        end = row["ended_at"]
-
-        grouped[user_id]["periods"].append(
-            (
-                start,
-                end
-            )
-        )
-
-        grouped[user_id]["total"] += (
-            calculate_duration(
-                start,
-                end
-            )
-        )
-
-    return list(
-        grouped.values()
-    )
-
-
-# =========================================================
 # PRESENCE VIEW
 # =========================================================
 
@@ -820,13 +727,9 @@ class PresenceView(
 
         session_id = get_current_session_id()
 
-        avatar_url = None
-
-        if user.display_avatar:
-
-            avatar_url = str(
-                user.display_avatar.url
-            )
+        avatar_url = str(
+            user.display_avatar.url
+        )
 
         conn = get_db()
         cur = conn.cursor()
@@ -860,7 +763,7 @@ class PresenceView(
         current_time = now_local().isoformat()
 
         # =================================================
-        # ADĂUGĂM ÎN LISTA ACTIVĂ
+        # PREZENȚĂ ACTIVĂ
         # =================================================
 
         cur.execute("""
@@ -881,7 +784,7 @@ class PresenceView(
         ))
 
         # =================================================
-        # ADĂUGĂM ÎN ISTORIC
+        # ISTORIC
         # =================================================
 
         cur.execute("""
@@ -906,7 +809,7 @@ class PresenceView(
         conn.close()
 
         # =================================================
-        # NU TRIMITEM MESAJ
+        # FĂRĂ MESAJ
         # =================================================
 
         await interaction.response.defer(
@@ -975,7 +878,7 @@ class PresenceView(
         current_time = now_local().isoformat()
 
         # =================================================
-        # ÎNCHIDEM ULTIMA PERIOADĂ FĂRĂ IEȘIRE
+        # ÎNCHIDEM ULTIMA INTRARE
         # =================================================
 
         cur.execute("""
@@ -1005,7 +908,7 @@ class PresenceView(
             ))
 
         # =================================================
-        # ȘTERGEM DIN LISTA ACTIVĂ
+        # SCOATEM PERSOANA DIN PANOU
         # =================================================
 
         cur.execute("""
@@ -1021,7 +924,7 @@ class PresenceView(
         conn.close()
 
         # =================================================
-        # NU TRIMITEM MESAJ
+        # FĂRĂ MESAJ
         # =================================================
 
         await interaction.response.defer(
@@ -1118,7 +1021,7 @@ async def setup_prezenta(
     )
 
     # =====================================================
-    # ȘTERGEM PANELUL VECHI
+    # ȘTERGEM PANoul VECHI
     # =====================================================
 
     old_channel_id = get_setting(
@@ -1180,7 +1083,7 @@ async def setup_prezenta(
     )
 
     # =====================================================
-    # CURĂȚĂM PREZENȚELE ACTIVE ALE SESIUNII NOI
+    # CURĂȚĂM LISTA ACTIVĂ A SESIUNII NOI
     # =====================================================
 
     conn = get_db()
@@ -1245,9 +1148,7 @@ async def setup_prezenta(
 
 @bot.tree.command(
     name="incheie_prezenta",
-    description=(
-        "Încheie sesiunea de prezență."
-    )
+    description="Încheie sesiunea de prezență."
 )
 @app_commands.default_permissions(
     administrator=True
@@ -1278,18 +1179,10 @@ async def incheie_prezenta(
         ephemeral=True
     )
 
-    # =====================================================
-    # ÎNCHIDEM SESIUNEA
-    # =====================================================
-
     set_setting(
         "session_active",
         "0"
     )
-
-    # =====================================================
-    # SCHIMBĂM PANELUL
-    # =====================================================
 
     try:
 
@@ -1344,10 +1237,7 @@ async def incheie_prezenta(
 
 @bot.tree.command(
     name="prezenta",
-    description=(
-        "Vezi dacă ești prezent "
-        "în sesiunea curentă."
-    )
+    description="Vezi dacă ești prezent în sesiunea curentă."
 )
 async def prezenta(
     interaction: discord.Interaction
@@ -1403,17 +1293,19 @@ async def prezenta(
 # /istoric_prezente
 # =========================================================
 
+@app_commands.describe(
+    data="Data dorită în format ZZ.LL.AAAA. Dacă este goală, se folosește ziua de azi."
+)
 @bot.tree.command(
     name="istoric_prezente",
-    description=(
-        "Afișează istoricul persoanelor prezente."
-    )
+    description="Afișează istoricul prezenței pentru o anumită zi."
 )
 @app_commands.default_permissions(
     administrator=True
 )
 async def istoric_prezente(
-    interaction: discord.Interaction
+    interaction: discord.Interaction,
+    data: str | None = None
 ):
 
     if not interaction.user.guild_permissions.administrator:
@@ -1425,89 +1317,159 @@ async def istoric_prezente(
 
         return
 
+    # =====================================================
+    # DATA
+    # =====================================================
+
+    if data:
+
+        try:
+
+            selected_date = datetime.strptime(
+                data,
+                "%d.%m.%Y"
+            ).date()
+
+        except ValueError:
+
+            await interaction.response.send_message(
+                "❌ Data trebuie scrisă în formatul **ZZ.LL.AAAA**.\n"
+                "Exemplu: `/istoric_prezente data:04.10.2026`",
+                ephemeral=True
+            )
+
+            return
+
+    else:
+
+        selected_date = now_local().date()
+
     await interaction.response.defer(
         ephemeral=True
     )
 
-    rows = get_history()
+    # =====================================================
+    # CĂUTĂM TOATE INTRĂRILE ÎNCHISE
+    # DIN ZIUA ALEASĂ
+    # =====================================================
+
+    conn = get_db()
+    cur = conn.cursor()
+
+    cur.execute("""
+        SELECT *
+        FROM attendance_history
+        WHERE ended_at IS NOT NULL
+        ORDER BY id ASC
+    """)
+
+    all_rows = cur.fetchall()
+
+    conn.close()
+
+    rows = []
+
+    for row in all_rows:
+
+        started = parse_datetime(
+            row["started_at"]
+        )
+
+        ended = parse_datetime(
+            row["ended_at"]
+        )
+
+        if started is None or ended is None:
+            continue
+
+        # =================================================
+        # FOLOSIM DATA IEȘIRII
+        #
+        # Pentru o prezență normală în aceeași zi,
+        # aceasta este ziua pontajului.
+        # =================================================
+
+        if ended.date() != selected_date:
+            continue
+
+        rows.append(row)
+
+    # =====================================================
+    # NU EXISTĂ DATE
+    # =====================================================
 
     if not rows:
 
         await interaction.followup.send(
-            "📋 Nu există încă persoane în istoricul acestei sesiuni.",
+            (
+                "📋 **ISTORIC PREZENȚĂ**\n"
+                f"📅 {selected_date.strftime('%d.%m.%Y')}\n\n"
+                "Nu există prezențe încheiate pentru această zi."
+            ),
             ephemeral=True
         )
 
         return
 
-    grouped = group_history(
-        rows
-    )
+    # =====================================================
+    # GRUPARE DUPĂ PERSOANĂ
+    # =====================================================
+
+    grouped = {}
+
+    for row in rows:
+
+        user_id = row["user_id"]
+
+        if user_id not in grouped:
+
+            grouped[user_id] = {
+                "display_name": row["display_name"],
+                "user_id": user_id,
+                "periods": [],
+                "total": timedelta(0)
+            }
+
+        grouped[user_id]["periods"].append(
+            (
+                row["started_at"],
+                row["ended_at"]
+            )
+        )
+
+        grouped[user_id]["total"] += (
+            calculate_duration(
+                row["started_at"],
+                row["ended_at"]
+            )
+        )
+
+    # =====================================================
+    # EMBED
+    # =====================================================
 
     embeds = []
 
     current_embed = discord.Embed(
         title="📋 ISTORIC PREZENȚĂ",
         description=(
-            f"Sesiunea #{get_current_session_id()}"
+            f"📅 {selected_date.strftime('%d.%m.%Y')}"
         ),
         color=discord.Color.blue()
     )
 
-    current_embed.add_field(
-        name="👥 Persoane",
-        value=str(
-            len(grouped)
-        ),
-        inline=True
-    )
-
-    current_embed.add_field(
-        name="📝 Intrări",
-        value=str(
-            len(rows)
-        ),
-        inline=True
-    )
-
-    current_embed.add_field(
-        name="🕐 Status",
-        value="Intrări / ieșiri",
-        inline=True
-    )
-
     for index, person in enumerate(
-        grouped,
+        grouped.values(),
         start=1
     ):
 
-        name = person["display_name"]
-
-        periods = person["periods"]
-
         lines = []
 
-        for started_at, ended_at in periods:
+        for started_at, ended_at in person["periods"]:
 
-            start_text = format_time(
-                started_at
+            lines.append(
+                f"`{format_time(started_at)} → {format_time(ended_at)}`"
             )
-
-            if ended_at:
-
-                end_text = format_time(
-                    ended_at
-                )
-
-                lines.append(
-                    f"`{start_text} → {end_text}`"
-                )
-
-            else:
-
-                lines.append(
-                    f"`{start_text} → ÎNCĂ PREZENT`"
-                )
 
         total_text = format_duration(
             person["total"]
@@ -1519,12 +1481,9 @@ async def istoric_prezente(
             + f"**TOTAL: {total_text}**"
         )
 
-        if len(value) > 1000:
-
-            value = (
-                value[:950]
-                + "\n..."
-            )
+        # =================================================
+        # LIMITA DISCORD
+        # =================================================
 
         if len(current_embed.fields) >= 22:
 
@@ -1534,11 +1493,14 @@ async def istoric_prezente(
 
             current_embed = discord.Embed(
                 title="📋 ISTORIC PREZENȚĂ — continuare",
+                description=(
+                    f"📅 {selected_date.strftime('%d.%m.%Y')}"
+                ),
                 color=discord.Color.blue()
             )
 
         current_embed.add_field(
-            name=f"{index}. {name}",
+            name=f"{index}. <@{person['user_id']}>",
             value=value,
             inline=False
         )
@@ -1546,6 +1508,10 @@ async def istoric_prezente(
     embeds.append(
         current_embed
     )
+
+    # =====================================================
+    # TRIMITEM ISTORICUL
+    # =====================================================
 
     for embed in embeds:
 
