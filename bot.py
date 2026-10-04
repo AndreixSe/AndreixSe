@@ -302,6 +302,49 @@ def migrate_database():
         )
     """)
 
+    # Migrare automată pentru versiuni vechi ale tabelului attendance.
+    cur.execute("PRAGMA table_info(attendance)")
+    attendance_columns = [
+        row["name"]
+        for row in cur.fetchall()
+    ]
+
+    if "user_name" not in attendance_columns:
+        cur.execute("""
+            ALTER TABLE attendance
+            ADD COLUMN user_name TEXT
+        """)
+        print("✅ Coloana attendance.user_name a fost adăugată.")
+
+    if "started_at" not in attendance_columns:
+        cur.execute("""
+            ALTER TABLE attendance
+            ADD COLUMN started_at TEXT
+        """)
+        print("✅ Coloana attendance.started_at a fost adăugată.")
+
+    # Convertim timestamp-urile vechi ISO în formatul nou.
+    cur.execute("""
+        SELECT user_id, started_at
+        FROM attendance
+        WHERE started_at IS NOT NULL
+    """)
+
+    old_attendance_rows = cur.fetchall()
+
+    for row in old_attendance_rows:
+        formatted = format_timestamp(row["started_at"])
+
+        if formatted != row["started_at"]:
+            cur.execute("""
+                UPDATE attendance
+                SET started_at = ?
+                WHERE user_id = ?
+            """, (
+                formatted,
+                row["user_id"]
+            ))
+
     cur.execute("""
         CREATE TABLE IF NOT EXISTS attendance_history (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -311,6 +354,60 @@ def migrate_database():
             ended_at TEXT
         )
     """)
+
+    # Migrare automată pentru versiuni vechi ale istoricului.
+    cur.execute("PRAGMA table_info(attendance_history)")
+    history_columns = [
+        row["name"]
+        for row in cur.fetchall()
+    ]
+
+    if "user_name" not in history_columns:
+        cur.execute("""
+            ALTER TABLE attendance_history
+            ADD COLUMN user_name TEXT
+        """)
+        print("✅ Coloana attendance_history.user_name a fost adăugată.")
+
+    if "started_at" not in history_columns:
+        cur.execute("""
+            ALTER TABLE attendance_history
+            ADD COLUMN started_at TEXT
+        """)
+        print("✅ Coloana attendance_history.started_at a fost adăugată.")
+
+    if "ended_at" not in history_columns:
+        cur.execute("""
+            ALTER TABLE attendance_history
+            ADD COLUMN ended_at TEXT
+        """)
+        print("✅ Coloana attendance_history.ended_at a fost adăugată.")
+
+    # Convertim și istoricul vechi din ISO în formatul nou.
+    cur.execute("""
+        SELECT id, started_at, ended_at
+        FROM attendance_history
+    """)
+
+    old_history_rows = cur.fetchall()
+
+    for row in old_history_rows:
+        formatted_started = format_timestamp(row["started_at"])
+        formatted_ended = format_timestamp(row["ended_at"])
+
+        if (
+            formatted_started != row["started_at"]
+            or formatted_ended != row["ended_at"]
+        ):
+            cur.execute("""
+                UPDATE attendance_history
+                SET started_at = ?, ended_at = ?
+                WHERE id = ?
+            """, (
+                formatted_started,
+                formatted_ended,
+                row["id"]
+            ))
 
     # -----------------------------------------------------
     # PATROLS
@@ -533,6 +630,31 @@ def now():
 def now_string():
 
     return now().strftime("%d.%m.%Y %H:%M:%S")
+
+
+def format_timestamp(value):
+    """
+    Normalizează atât timestamp-urile noi (DD.MM.YYYY HH:MM:SS),
+    cât și timestamp-urile ISO rămase din versiuni vechi ale botului.
+    """
+    if not value:
+        return value
+
+    value = str(value).strip()
+
+    # Deja este în formatul dorit.
+    try:
+        parsed = datetime.strptime(value, "%d.%m.%Y %H:%M:%S")
+        return parsed.strftime("%d.%m.%Y %H:%M:%S")
+    except ValueError:
+        pass
+
+    # Timestamp ISO vechi, inclusiv cu timezone.
+    try:
+        parsed = datetime.fromisoformat(value)
+        return parsed.strftime("%d.%m.%Y %H:%M:%S")
+    except ValueError:
+        return value
 
 
 # =========================================================
@@ -882,7 +1004,7 @@ def create_attendance_embed():
 
         lines.append(
             f"👤 <@{row['user_id']}> — "
-            f"🟢 {row['started_at']}"
+            f"🟢 {format_timestamp(row['started_at'])}"
         )
 
     embed.description = "\n".join(
@@ -1001,8 +1123,8 @@ class AttendanceView(discord.ui.View):
             VALUES (?, ?, ?, ?)
         """, (
             existing["user_id"],
-            existing["user_name"],
-            existing["started_at"],
+            existing["user_name"] or interaction.user.display_name,
+            format_timestamp(existing["started_at"]),
             ended_at
         ))
 
@@ -2031,10 +2153,10 @@ async def istoric_pontaj(
     for row in rows:
 
         embed.add_field(
-            name=f"👤 {row['user_name'] or '-'}",
+            name=f"👤 {row['user_name'] or f"<@{row['user_id']}>"}",
             value=(
-                f"🟢 Început: {row['started_at'] or '-'}\n"
-                f"🔴 Sfârșit: {row['ended_at'] or '-'}"
+                f"🟢 Început: {format_timestamp(row['started_at']) or '-'}\n"
+                f"🔴 Sfârșit: {format_timestamp(row['ended_at']) or '-'}"
             ),
             inline=False
         )
@@ -2273,6 +2395,24 @@ async def on_ready():
         print(
             f"❌ Eroare sincronizare comenzi: {e}"
         )
+
+
+# =========================================================
+# ERORI COMENZI PREFIX
+# =========================================================
+
+@bot.event
+async def on_command_error(
+    ctx,
+    error
+):
+
+    if isinstance(error, commands.CommandNotFound):
+        return
+
+    print(
+        f"❌ Eroare comandă prefix: {error}"
+    )
 
 
 # =========================================================
