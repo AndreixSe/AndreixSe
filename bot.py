@@ -210,6 +210,32 @@ def migrate_database(conn):
         )
     """)
 
+    # -----------------------------------------------------
+    # MIGRARE PATROLS
+    # -----------------------------------------------------
+
+    cursor.execute(
+        "PRAGMA table_info(patrols)"
+    )
+
+    patrol_columns = {
+        row["name"]
+        for row in cursor.fetchall()
+    }
+
+    # Dacă baza veche nu avea image_url,
+    # îl adăugăm fără să ștergem patrulele existente.
+    if "image_url" not in patrol_columns:
+
+        print(
+            "Adaug coloana image_url în tabelul patrols..."
+        )
+
+        cursor.execute("""
+            ALTER TABLE patrols
+            ADD COLUMN image_url TEXT
+        """)
+
     # =====================================================
     # PATROL PEOPLE
     # =====================================================
@@ -430,28 +456,48 @@ def parse_user_mentions(text):
     return result
 
 
+# =========================================================
+# CREATE PATROL EMBED
+# =========================================================
+
 def create_patrol_embed(patrol=None):
 
     if patrol is None:
         patrol = get_active_patrol()
 
+    # =====================================================
+    # FĂRĂ PATRULĂ
+    # =====================================================
+
     if patrol is None:
 
         embed = discord.Embed(
             title="🔴 PATRULĂ",
-            description="Nu există nicio patrulă activă.",
+            description=(
+                "Nu există nicio patrulă activă."
+            ),
             color=discord.Color.red()
+        )
+
+        embed.add_field(
+            name="🚓 STATUS",
+            value="**Nicio patrulă activă.**",
+            inline=False
+        )
+
+        embed.set_footer(
+            text="Sistem Patrule"
         )
 
         return embed
 
-    people = get_patrol_people(
-        patrol["id"]
-    )
-
     # =====================================================
     # PERSOANE
     # =====================================================
+
+    people = get_patrol_people(
+        patrol["id"]
+    )
 
     if people:
 
@@ -462,7 +508,9 @@ def create_patrol_embed(patrol=None):
 
     else:
 
-        people_text = "Nicio persoană selectată."
+        people_text = (
+            "Nicio persoană selectată."
+        )
 
     # =====================================================
     # EMBED
@@ -520,11 +568,35 @@ def create_patrol_embed(patrol=None):
         inline=False
     )
 
-    embed.add_field(
-        name="📸 POZA",
-        value="Imaginea este afișată mai jos.",
-        inline=False
-    )
+    # =====================================================
+    # POZA
+    # =====================================================
+
+    image_url = patrol["image_url"]
+
+    if image_url:
+
+        embed.add_field(
+            name="📸 POZA",
+            value=(
+                f"[🖼️ Deschide poza la rezoluție completă]"
+                f"({image_url})"
+            ),
+            inline=False
+        )
+
+        # Imaginea apare MARE în partea de jos a embedului.
+        embed.set_image(
+            url=image_url
+        )
+
+    else:
+
+        embed.add_field(
+            name="📸 POZA",
+            value="Nu a fost adăugată nicio poză.",
+            inline=False
+        )
 
     embed.set_footer(
         text=(
@@ -532,16 +604,6 @@ def create_patrol_embed(patrol=None):
             f"Pornită de {patrol['created_by_name']}"
         )
     )
-
-    # =====================================================
-    # POZA
-    # =====================================================
-
-    if patrol["image_url"]:
-
-        embed.set_image(
-            url=patrol["image_url"]
-        )
 
     return embed
 
@@ -1421,6 +1483,139 @@ async def setup_patrule(
 
 
 # =========================================================
+# INCĂRCARE POZĂ PATRULĂ
+# =========================================================
+
+async def save_patrol_image(
+    interaction: discord.Interaction,
+    poza: discord.Attachment
+):
+    """
+    Face o copie a pozei într-un mesaj Discord și
+    returnează URL-ul attachment-ului copiat.
+
+    Astfel nu mai folosim direct URL-ul primit de
+    comanda slash.
+    """
+
+    if poza is None:
+        return None
+
+    allowed_types = {
+        "image/png",
+        "image/jpeg",
+        "image/jpg",
+        "image/webp",
+        "image/gif"
+    }
+
+    # -----------------------------------------------------
+    # VERIFICĂM EXTENSIA / CONTENT TYPE
+    # -----------------------------------------------------
+
+    if (
+        poza.content_type
+        and poza.content_type not in allowed_types
+    ):
+
+        raise ValueError(
+            "Fișierul trimis nu este o imagine. "
+            "Folosește PNG, JPG, JPEG, WEBP sau GIF."
+        )
+
+    # -----------------------------------------------------
+    # VERIFICĂM MĂRIMEA
+    # -----------------------------------------------------
+
+    # Discord permite diferite limite în funcție de server/
+    # utilizator. Nu blocăm aici o limită artificială.
+    # Discord va returna eroare dacă fișierul este prea mare.
+    # -----------------------------------------------------
+
+    # -----------------------------------------------------
+    # CANAL DESTINAȚIE
+    # -----------------------------------------------------
+
+    channel = None
+
+    patrol_channel_id = get_setting(
+        "patrol_channel_id"
+    )
+
+    if patrol_channel_id:
+
+        try:
+
+            channel = bot.get_channel(
+                int(patrol_channel_id)
+            )
+
+            if channel is None:
+
+                channel = await bot.fetch_channel(
+                    int(patrol_channel_id)
+                )
+
+        except Exception as e:
+
+            print(
+                f"Nu am putut accesa canalul de patrule: {e}"
+            )
+
+    # Dacă panoul nu există încă, folosim canalul
+    # în care a fost executată comanda.
+    if channel is None:
+
+        channel = interaction.channel
+
+    if channel is None:
+
+        raise ValueError(
+            "Nu am găsit un canal în care să salvez poza."
+        )
+
+    # -----------------------------------------------------
+    # DESCĂRCĂM FIȘIERUL
+    # -----------------------------------------------------
+
+    file_data = await poza.to_file()
+
+    # -----------------------------------------------------
+    # TRIMITEM COPIA PE DISCORD
+    # -----------------------------------------------------
+
+    photo_message = await channel.send(
+        content=(
+            f"📸 **Poză patrulă** • "
+            f"Încărcată de {interaction.user.mention}"
+        ),
+        file=file_data
+    )
+
+    # -----------------------------------------------------
+    # LUĂM URL-UL COPIEI
+    # -----------------------------------------------------
+
+    if not photo_message.attachments:
+
+        raise ValueError(
+            "Poza a fost trimisă, dar Discord nu a returnat attachment-ul."
+        )
+
+    saved_attachment = (
+        photo_message.attachments[0]
+    )
+
+    saved_url = saved_attachment.url
+
+    print(
+        f"Poză patrulă salvată: {saved_url}"
+    )
+
+    return saved_url
+
+
+# =========================================================
 # INCEPE PATRULA
 # =========================================================
 
@@ -1512,18 +1707,34 @@ async def incepe_patrula(
     current = now_local()
 
     if not data:
+
         patrol_date = current.strftime(
             "%d.%m.%Y"
         )
+
     else:
+
         patrol_date = data
 
     if not ora:
+
         patrol_time = current.strftime(
             "%H:%M"
         )
+
     else:
+
         patrol_time = ora
+
+    # =====================================================
+    # RĂSPUNDEM DEFERRED
+    # =====================================================
+    # Facem defer pentru că încărcarea/copierea pozei
+    # poate dura câteva secunde.
+
+    await interaction.response.defer(
+        ephemeral=True
+    )
 
     # =====================================================
     # POZA
@@ -1533,29 +1744,53 @@ async def incepe_patrula(
 
     if poza:
 
-        allowed_types = {
-            "image/png",
-            "image/jpeg",
-            "image/webp",
-            "image/gif"
-        }
+        try:
 
-        if (
-            poza.content_type
-            and poza.content_type not in allowed_types
-        ):
+            image_url = await save_patrol_image(
+                interaction,
+                poza
+            )
 
-            await interaction.response.send_message(
+        except ValueError as e:
+
+            await interaction.followup.send(
+                f"🔴 {e}",
+                ephemeral=True
+            )
+
+            return
+
+        except discord.HTTPException as e:
+
+            print(
+                f"Eroare Discord la încărcarea pozei: {e}"
+            )
+
+            await interaction.followup.send(
                 (
-                    "🔴 Fișierul trimis nu pare să fie o imagine.\n"
-                    "Folosește PNG, JPG, JPEG, WEBP sau GIF."
+                    "🔴 Nu am putut salva poza pe Discord.\n"
+                    "Verifică dimensiunea fișierului și "
+                    "permisiunile botului în canal."
                 ),
                 ephemeral=True
             )
 
             return
 
-        image_url = poza.url
+        except Exception as e:
+
+            print(
+                f"Eroare la salvarea pozei: {e}"
+            )
+
+            await interaction.followup.send(
+                (
+                    "🔴 A apărut o eroare la salvarea pozei."
+                ),
+                ephemeral=True
+            )
+
+            return
 
     # =====================================================
     # CREĂM PATRULA
@@ -1659,7 +1894,14 @@ async def incepe_patrula(
     # RĂSPUNS
     # =====================================================
 
-    await interaction.response.send_message(
+    photo_status = (
+        "📸 Poza a fost salvată și afișată în panou."
+        if image_url
+        else
+        "📸 Nu a fost adăugată nicio poză."
+    )
+
+    await interaction.followup.send(
         (
             "🟢 **Patrula a fost pornită cu succes!**\n\n"
             f"🚓 **{nume}**\n"
@@ -1667,7 +1909,8 @@ async def incepe_patrula(
             f"🚗 Mașini: **{nr_auto}**\n"
             f"🎨 Culoare: **{culoare}**\n"
             f"📅 Data: **{patrol_date}**\n"
-            f"🕐 Ora: **{patrol_time}**"
+            f"🕐 Ora: **{patrol_time}**\n"
+            f"{photo_status}"
         ),
         ephemeral=True
     )
@@ -1792,9 +2035,11 @@ async def istoric_patrule(
             color,
             patrol_date,
             patrol_time,
+            image_url,
             started_at,
             ended_at,
-            created_by_name
+            created_by_name,
+            active
         FROM patrols
         ORDER BY id DESC
         LIMIT 10
@@ -1834,6 +2079,13 @@ async def istoric_patrule(
             f"📅 {row['patrol_date']} • 🕐 {row['patrol_time']}\n"
             f"👮 Pornită de: **{row['created_by_name']}**"
         )
+
+        if row["image_url"]:
+
+            value += (
+                "\n📸 "
+                f"[Vezi poza]({row['image_url']})"
+            )
 
         embed.add_field(
             name=f"🚓 #{row['id']} • {row['name']}",
