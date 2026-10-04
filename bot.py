@@ -22,6 +22,90 @@ if not os.path.exists("/data"):
 
 
 # =========================================================
+# ROLURI DONAȚII
+# =========================================================
+
+# Acces TOTAL la sistemul de donații:
+# - /setup_donatii
+# - /donatii
+# - butonul ✅ PRIMITĂ
+# - butonul ❌ NEPRIMITĂ
+# - /donatie
+DONATION_FULL_ACCESS_ROLE_IDS = {
+    1527919721629089862,  # Co-Lider
+    1528799552075989102,  # Lider
+    1554072182735511623,  # Discord Mod
+}
+
+
+# Acces pentru CREAREA unei donații:
+# - /donatie
+DONATION_CREATE_ROLE_IDS = {
+    1527919721629089862,  # Co-Lider
+    1528799552075989102,  # Lider
+    1554072182735511623,  # Discord Mod
+    1528804522938597557,  # Miembro
+}
+
+
+def has_donation_full_access(
+    interaction: discord.Interaction
+) -> bool:
+
+    if not interaction.guild:
+        return False
+
+    member = interaction.user
+
+    if not isinstance(member, discord.Member):
+        return False
+
+    return any(
+        role.id in DONATION_FULL_ACCESS_ROLE_IDS
+        for role in member.roles
+    )
+
+
+def has_donation_create_access(
+    interaction: discord.Interaction
+) -> bool:
+
+    if not interaction.guild:
+        return False
+
+    member = interaction.user
+
+    if not isinstance(member, discord.Member):
+        return False
+
+    return any(
+        role.id in DONATION_CREATE_ROLE_IDS
+        for role in member.roles
+    )
+
+
+def donation_full_access_message():
+
+    return (
+        "❌ **Nu ai acces la această funcție.**\n\n"
+        "Ai nevoie de unul dintre gradele:\n"
+        "👑 **Lider**\n"
+        "🛡️ **Co-Lider**\n"
+        "🔧 **Discord Mod**"
+    )
+
+
+def donation_create_access_message():
+
+    return (
+        "❌ **Nu ai acces la această funcție.**\n\n"
+        "Pentru a crea o donație ai nevoie de gradul:\n"
+        "👤 **Miembro**\n\n"
+        "Lider, Co-Lider și Discord Mod au de asemenea acces."
+    )
+
+
+# =========================================================
 # DISCORD
 # =========================================================
 
@@ -40,16 +124,14 @@ bot = commands.Bot(
 # =========================================================
 
 def get_db():
+
     conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
+
     return conn
 
 
 def migrate_database():
-    """
-    Creează tabelele dacă nu există și repară schema veche
-    fără să șteargă datele existente.
-    """
 
     conn = get_db()
     cur = conn.cursor()
@@ -109,8 +191,8 @@ def migrate_database():
         )
     """)
 
-    # Verificăm coloanele existente în patrols
     cur.execute("PRAGMA table_info(patrols)")
+
     patrol_columns = [
         row["name"]
         for row in cur.fetchall()
@@ -156,16 +238,10 @@ def migrate_database():
 
     cur.execute("PRAGMA table_info(patrol_people)")
 
-    patrol_people_info = cur.fetchall()
-
     patrol_people_columns = [
         row["name"]
-        for row in patrol_people_info
+        for row in cur.fetchall()
     ]
-
-    # -----------------------------------------------------
-    # REPARĂM SCHEMA VECHE
-    # -----------------------------------------------------
 
     if "user_name" not in patrol_people_columns:
 
@@ -307,10 +383,12 @@ def set_setting(key, value):
 # =========================================================
 
 def now():
+
     return datetime.now()
 
 
 def now_string():
+
     return now().strftime("%d.%m.%Y %H:%M:%S")
 
 
@@ -978,7 +1056,6 @@ class DonationItemView(discord.ui.View):
 
         self.donation_id = donation_id
 
-        # Setăm custom_id-uri unice pentru fiecare donație.
         self.received_button.custom_id = (
             f"donation_received_{donation_id}"
         )
@@ -997,6 +1074,19 @@ class DonationItemView(discord.ui.View):
         interaction: discord.Interaction,
         button: discord.ui.Button
     ):
+
+        # -------------------------------------------------
+        # DOAR LIDER / CO-LIDER / DISCORD MOD
+        # -------------------------------------------------
+
+        if not has_donation_full_access(interaction):
+
+            await interaction.response.send_message(
+                donation_full_access_message(),
+                ephemeral=True
+            )
+
+            return
 
         donation = get_donation(
             self.donation_id
@@ -1064,7 +1154,8 @@ class DonationItemView(discord.ui.View):
 
         await interaction.response.send_message(
             f"✅ Donația #{self.donation_id} "
-            f"a fost marcată ca **PRIMITĂ**.",
+            f"a fost marcată ca **PRIMITĂ** de "
+            f"{interaction.user.mention}.",
             ephemeral=True
         )
 
@@ -1080,6 +1171,19 @@ class DonationItemView(discord.ui.View):
         interaction: discord.Interaction,
         button: discord.ui.Button
     ):
+
+        # -------------------------------------------------
+        # DOAR LIDER / CO-LIDER / DISCORD MOD
+        # -------------------------------------------------
+
+        if not has_donation_full_access(interaction):
+
+            await interaction.response.send_message(
+                donation_full_access_message(),
+                ephemeral=True
+            )
+
+            return
 
         donation = get_donation(
             self.donation_id
@@ -1159,8 +1263,6 @@ async def update_donation_panel():
             )
 
             return
-
-        # Panoul principal arată rezumatul donațiilor.
 
         embed = discord.Embed(
             title="🎁 PANOU DONAȚII",
@@ -1290,6 +1392,7 @@ async def setup_patrule(
     name="setup_donatii",
     description="Creează panoul de donații în canalul curent."
 )
+@app_commands.check(has_donation_full_access)
 async def setup_donatii(
     interaction: discord.Interaction
 ):
@@ -1352,10 +1455,6 @@ async def incepe_patrula(
         ephemeral=True
     )
 
-    # -----------------------------------------------------
-    # O SINGURĂ PATRULĂ ACTIVĂ
-    # -----------------------------------------------------
-
     active_patrol = get_active_patrol()
 
     if active_patrol:
@@ -1368,10 +1467,6 @@ async def incepe_patrula(
         )
 
         return
-
-    # -----------------------------------------------------
-    # PARSĂM MENTIONURILE
-    # -----------------------------------------------------
 
     user_ids = parse_user_mentions(
         persoane
@@ -1387,10 +1482,6 @@ async def incepe_patrula(
         )
 
         return
-
-    # -----------------------------------------------------
-    # VERIFICĂM MEMBRII
-    # -----------------------------------------------------
 
     members = []
 
@@ -1426,10 +1517,6 @@ async def incepe_patrula(
 
         return
 
-    # -----------------------------------------------------
-    # VERIFICĂM NR AUTO
-    # -----------------------------------------------------
-
     if nr_auto < 1:
 
         await interaction.followup.send(
@@ -1438,10 +1525,6 @@ async def incepe_patrula(
         )
 
         return
-
-    # -----------------------------------------------------
-    # VERIFICĂM POZA
-    # -----------------------------------------------------
 
     if poza is not None:
 
@@ -1460,10 +1543,6 @@ async def incepe_patrula(
             )
 
             return
-
-    # -----------------------------------------------------
-    # CANAL PANOU
-    # -----------------------------------------------------
 
     panel_channel_id = get_setting(
         "patrol_panel_channel_id"
@@ -1492,10 +1571,6 @@ async def incepe_patrula(
 
         return
 
-    # -----------------------------------------------------
-    # SALVĂM POZA
-    # -----------------------------------------------------
-
     image_url = None
 
     if poza is not None:
@@ -1504,10 +1579,6 @@ async def incepe_patrula(
             panel_channel,
             poza
         )
-
-    # -----------------------------------------------------
-    # CREĂM PATRULA
-    # -----------------------------------------------------
 
     conn = get_db()
     cur = conn.cursor()
@@ -1547,10 +1618,6 @@ async def incepe_patrula(
 
     patrol_id = cur.lastrowid
 
-    # -----------------------------------------------------
-    # SALVĂM PERSOANELE
-    # -----------------------------------------------------
-
     for member in members:
 
         user_name = member.display_name
@@ -1577,15 +1644,7 @@ async def incepe_patrula(
     conn.commit()
     conn.close()
 
-    # -----------------------------------------------------
-    # ACTUALIZĂM PANOU
-    # -----------------------------------------------------
-
     await update_patrol_panel()
-
-    # -----------------------------------------------------
-    # CONFIRMARE
-    # -----------------------------------------------------
 
     mentions_text = " ".join(
         member.mention
@@ -1659,15 +1718,7 @@ async def incheie_patrula(
 
     conn.close()
 
-    # -----------------------------------------------------
-    # ACTUALIZĂM PANOU
-    # -----------------------------------------------------
-
     await update_patrol_panel()
-
-    # -----------------------------------------------------
-    # CONFIRMARE
-    # -----------------------------------------------------
 
     embed = create_patrol_embed(
         updated_patrol
@@ -1771,429 +1822,4 @@ async def istoric_patrule(
                 f"🕐 {patrol['patrol_time'] or '-'}\n"
                 f"🚗 Auto: {patrol['cars_count'] or 0}\n"
                 f"👤 Persoane: {patrol['people_count'] or 0}\n"
-                f"🎨 {patrol['color'] or '-'}"
-            ),
-            inline=False
-        )
-
-    await interaction.response.send_message(
-        embed=embed,
-        ephemeral=True
-    )
-
-
-# =========================================================
-# PONTAJ COMANDĂ
-# =========================================================
-
-@bot.tree.command(
-    name="pontaj",
-    description="Afișează pontajul actual."
-)
-async def pontaj(
-    interaction: discord.Interaction
-):
-
-    embed = create_attendance_embed()
-
-    await interaction.response.send_message(
-        embed=embed,
-        ephemeral=True
-    )
-
-
-# =========================================================
-# ISTORIC PONTAJ
-# =========================================================
-
-@bot.tree.command(
-    name="istoric_pontaj",
-    description="Afișează istoricul pontajului."
-)
-async def istoric_pontaj(
-    interaction: discord.Interaction
-):
-
-    conn = get_db()
-    cur = conn.cursor()
-
-    cur.execute("""
-        SELECT *
-        FROM attendance_history
-        ORDER BY id DESC
-        LIMIT 20
-    """)
-
-    rows = cur.fetchall()
-
-    conn.close()
-
-    if not rows:
-
-        await interaction.response.send_message(
-            "❌ Nu există istoric de pontaj.",
-            ephemeral=True
-        )
-
-        return
-
-    embed = discord.Embed(
-        title="📋 ISTORIC PONTAJ",
-        color=discord.Color.green()
-    )
-
-    for row in rows:
-
-        embed.add_field(
-            name=f"👤 {row['user_name']}",
-            value=(
-                f"🟢 Început: {row['started_at']}\n"
-                f"🔴 Sfârșit: {row['ended_at']}"
-            ),
-            inline=False
-        )
-
-    await interaction.response.send_message(
-        embed=embed,
-        ephemeral=True
-    )
-
-
-# =========================================================
-# ÎNREGISTREAZĂ DONAȚIE
-# =========================================================
-
-@bot.tree.command(
-    name="donatie",
-    description="Înregistrează o donație."
-)
-@app_commands.describe(
-    persoana="Persoana care face donația",
-    obiecte="Obiectele donate",
-    numar="Numărul total de obiecte"
-)
-async def donatie(
-    interaction: discord.Interaction,
-    persoana: discord.Member,
-    obiecte: str,
-    numar: int
-):
-
-    await interaction.response.defer(
-        ephemeral=True
-    )
-
-    if numar < 1:
-
-        await interaction.followup.send(
-            "❌ Numărul de obiecte trebuie să fie cel puțin 1.",
-            ephemeral=True
-        )
-
-        return
-
-    panel_channel_id = get_setting(
-        "donation_panel_channel_id"
-    )
-
-    if not panel_channel_id:
-
-        await interaction.followup.send(
-            "❌ Panoul de donații nu este configurat.\n"
-            "Rulează mai întâi `/setup_donatii`.",
-            ephemeral=True
-        )
-
-        return
-
-    conn = get_db()
-    cur = conn.cursor()
-
-    cur.execute("""
-        INSERT INTO donations(
-            donor_id,
-            donor_name,
-            items,
-            items_count,
-            status,
-            created_at,
-            confirmed_at,
-            confirmed_by_id,
-            confirmed_by_name
-        )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-    """, (
-        persoana.id,
-        persoana.display_name,
-        obiecte,
-        numar,
-        "pending",
-        now_string(),
-        None,
-        None,
-        None
-    ))
-
-    donation_id = cur.lastrowid
-
-    conn.commit()
-    conn.close()
-
-    # -----------------------------------------------------
-    # CREĂM MESAJUL DONAȚIEI
-    # -----------------------------------------------------
-
-    try:
-
-        channel = bot.get_channel(
-            int(panel_channel_id)
-        )
-
-        if channel is None:
-
-            await interaction.followup.send(
-                "❌ Canalul panoului de donații nu a fost găsit.",
-                ephemeral=True
-            )
-
-            return
-
-        donation = get_donation(
-            donation_id
-        )
-
-        await channel.send(
-            embed=create_donation_embed(
-                donation
-            ),
-            view=DonationItemView(
-                donation_id
-            )
-        )
-
-    except Exception as e:
-
-        print(
-            f"❌ Eroare creare mesaj donație: {e}"
-        )
-
-        await interaction.followup.send(
-            "❌ Donația a fost salvată în baza de date, "
-            "dar nu am putut afișa panoul donației.",
-            ephemeral=True
-        )
-
-        return
-
-    # Actualizăm și panoul principal
-    await update_donation_panel()
-
-    await interaction.followup.send(
-        "✅ **Donația a fost înregistrată!**\n\n"
-        f"🎁 Donație #{donation_id}\n"
-        f"👤 Donator: {persoana.mention}\n"
-        f"📦 Obiecte: {obiecte}\n"
-        f"🔢 Număr: {numar}\n"
-        f"📌 Status: ❌ NEPRIMITĂ",
-        ephemeral=True
-    )
-
-
-# =========================================================
-# VEZI DONAȚII
-# =========================================================
-
-@bot.tree.command(
-    name="donatii",
-    description="Afișează donațiile recente."
-)
-async def donatii(
-    interaction: discord.Interaction
-):
-
-    donations = get_donations()
-
-    if not donations:
-
-        await interaction.response.send_message(
-            "❌ Nu există donații înregistrate.",
-            ephemeral=True
-        )
-
-        return
-
-    embed = discord.Embed(
-        title="🎁 DONAȚII",
-        color=discord.Color.gold()
-    )
-
-    for donation in donations:
-
-        if donation["status"] == "received":
-
-            status = "✅ PRIMITĂ"
-
-        else:
-
-            status = "❌ NEPRIMITĂ"
-
-        embed.add_field(
-            name=(
-                f"🎁 Donația #{donation['id']} "
-                f"— {status}"
-            ),
-            value=(
-                f"👤 <@{donation['donor_id']}>\n"
-                f"📦 {donation['items'] or '-'}\n"
-                f"🔢 {donation['items_count'] or 0} obiecte\n"
-                f"📅 {donation['created_at'] or '-'}"
-            ),
-            inline=False
-        )
-
-    await interaction.response.send_message(
-        embed=embed,
-        ephemeral=True
-    )
-
-
-# =========================================================
-# READY
-# =========================================================
-
-@bot.event
-async def on_ready():
-
-    print("========================================")
-    print(f"🤖 Bot conectat ca {bot.user}")
-    print("========================================")
-
-    # -----------------------------------------------------
-    # COMENZI SLASH
-    # -----------------------------------------------------
-
-    try:
-
-        synced = await bot.tree.sync()
-
-        print(
-            f"✅ Comenzi sincronizate: {len(synced)}"
-        )
-
-    except Exception as e:
-
-        print(
-            f"❌ Eroare sincronizare comenzi: {e}"
-        )
-
-    # -----------------------------------------------------
-    # PERSISTENT VIEWS
-    # -----------------------------------------------------
-
-    try:
-
-        bot.add_view(
-            PatrolView()
-        )
-
-        bot.add_view(
-            AttendanceView()
-        )
-
-        # IMPORTANT:
-        # Butoanele donațiilor sunt dinamice și au
-        # custom_id unic pentru fiecare donație.
-        #
-        # Donațiile noi își creează propriul View.
-        # Pentru butoanele donațiilor existente după restart,
-        # le înregistrăm mai jos.
-
-        donations = get_donations()
-
-        for donation in donations:
-
-            bot.add_view(
-                DonationItemView(
-                    donation["id"]
-                )
-            )
-
-        print(
-            "✅ Butoanele persistente au fost încărcate."
-        )
-
-        print(
-            f"✅ Au fost încărcate "
-            f"{len(donations)} donații."
-        )
-
-    except Exception as e:
-
-        print(
-            f"❌ Eroare persistent views: {e}"
-        )
-
-
-# =========================================================
-# ERROR HANDLER
-# =========================================================
-
-@bot.tree.error
-async def on_app_command_error(
-    interaction: discord.Interaction,
-    error: app_commands.AppCommandError
-):
-
-    print(
-        f"❌ App command error: {repr(error)}"
-    )
-
-    if isinstance(
-        error,
-        app_commands.CommandInvokeError
-    ):
-
-        print(
-            f"❌ Cauza reală: "
-            f"{repr(error.original)}"
-        )
-
-    try:
-
-        if interaction.response.is_done():
-
-            await interaction.followup.send(
-                "❌ A apărut o eroare la executarea comenzii. "
-                "Verifică logurile Railway.",
-                ephemeral=True
-            )
-
-        else:
-
-            await interaction.response.send_message(
-                "❌ A apărut o eroare la executarea comenzii. "
-                "Verifică logurile Railway.",
-                ephemeral=True
-            )
-
-    except Exception:
-        pass
-
-
-# =========================================================
-# START
-# =========================================================
-
-if not TOKEN:
-
-    raise RuntimeError(
-        "DISCORD_TOKEN nu este setat."
-    )
-
-
-# Foarte important:
-# Migrarea se face ÎNAINTE să pornească botul.
-
-migrate_database()
-
-bot.run(TOKEN)
+                f"🎨 {
