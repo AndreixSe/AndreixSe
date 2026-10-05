@@ -1,5 +1,6 @@
 import discord
 from datetime import datetime
+from zoneinfo import ZoneInfo
 
 from core.bot import bot
 from core.database import get_db, now_string
@@ -44,8 +45,12 @@ def can_use_attendance(member):
 # HELPERS
 # =========================================================
 
+def romania_now():
+    return datetime.now(ZoneInfo("Europe/Bucharest"))
+
+
 def today_string():
-    return datetime.now().strftime("%d.%m.%Y")
+    return romania_now().strftime("%d.%m.%Y")
 
 
 def time_only(value):
@@ -67,7 +72,7 @@ def duration_text(started_at, ended_at=None):
 
     def parse(value):
         if not value:
-            return datetime.now()
+            return romania_now().replace(tzinfo=None)
         value = str(value)
         try:
             return datetime.strptime(value, "%d.%m.%Y %H:%M:%S")
