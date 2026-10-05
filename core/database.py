@@ -440,7 +440,9 @@ def migrate_database():
             ended_at TEXT,
             created_by_id INTEGER,
             created_by_name TEXT,
-            active INTEGER DEFAULT 1
+            active INTEGER DEFAULT 1,
+            session_id TEXT,
+            message_id TEXT
         )
     """)
 
@@ -464,6 +466,8 @@ def migrate_database():
         "created_by_id": "INTEGER",
         "created_by_name": "TEXT",
         "active": "INTEGER DEFAULT 1",
+        "session_id": "TEXT",
+        "message_id": "TEXT",
     }
 
     for column, column_type in patrol_migrations.items():
@@ -581,6 +585,7 @@ def migrate_database():
     defaults = {
         "patrol_panel_channel_id": "",
         "patrol_panel_message_id": "",
+        "patrol_session_id": "",
 
         "attendance_panel_channel_id": "",
         "attendance_panel_message_id": "",
