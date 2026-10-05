@@ -228,45 +228,173 @@ def migrate_database():
                 row["user_id"]
             ))
 
+    # -----------------------------------------------------
+    # ATTENDANCE HISTORY
+    # Migrare robustă din schema veche către schema modulară.
+    # Păstrăm tabelul vechi ca backup înainte de conversie.
+    # -----------------------------------------------------
+
     cur.execute("""
-        CREATE TABLE IF NOT EXISTS attendance_history (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            user_id INTEGER,
-            user_name TEXT,
-            started_at TEXT,
-            ended_at TEXT
-        )
+        SELECT name
+        FROM sqlite_master
+        WHERE type = 'table'
+        AND name = 'attendance_history'
     """)
 
-    # Migrare automată pentru versiuni vechi ale istoricului.
-    cur.execute("PRAGMA table_info(attendance_history)")
-    history_columns = [
-        row["name"]
-        for row in cur.fetchall()
-    ]
+    history_exists = cur.fetchone() is not None
 
-    if "user_name" not in history_columns:
+    if not history_exists:
+
         cur.execute("""
-            ALTER TABLE attendance_history
-            ADD COLUMN user_name TEXT
+            CREATE TABLE attendance_history (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER,
+                user_name TEXT,
+                started_at TEXT,
+                ended_at TEXT
+            )
         """)
-        print("✅ Coloana attendance_history.user_name a fost adăugată.")
 
-    if "started_at" not in history_columns:
-        cur.execute("""
-            ALTER TABLE attendance_history
-            ADD COLUMN started_at TEXT
-        """)
-        print("✅ Coloana attendance_history.started_at a fost adăugată.")
+        print("✅ Tabelul attendance_history a fost creat.")
 
-    if "ended_at" not in history_columns:
-        cur.execute("""
-            ALTER TABLE attendance_history
-            ADD COLUMN ended_at TEXT
-        """)
-        print("✅ Coloana attendance_history.ended_at a fost adăugată.")
+    else:
 
-    # Convertim și istoricul vechi din ISO în formatul nou.
+        cur.execute("PRAGMA table_info(attendance_history)")
+        history_info = cur.fetchall()
+
+        history_columns = [
+            row["name"]
+            for row in history_info
+        ]
+
+        # Schema țintă a sistemului modular.
+        target_columns = {
+            "id",
+            "user_id",
+            "user_name",
+            "started_at",
+            "ended_at",
+        }
+
+        # Dacă există coloane legacy obligatorii (de ex. session_id,
+        # display_name) sau lipsesc coloane din schema nouă, reconstruim
+        # tabelul. SQLite nu poate elimina simplu constrângeri NOT NULL.
+        has_legacy_required_columns = any(
+            row["name"] not in target_columns
+            and row["notnull"] == 1
+            and row["dflt_value"] is None
+            for row in history_info
+        )
+
+        missing_target_columns = any(
+            column not in history_columns
+            for column in ("user_id", "user_name", "started_at", "ended_at")
+        )
+
+        if has_legacy_required_columns or missing_target_columns:
+
+            backup_table = "attendance_history_legacy_backup"
+            counter = 1
+
+            while True:
+
+                cur.execute("""
+                    SELECT name
+                    FROM sqlite_master
+                    WHERE type = 'table'
+                    AND name = ?
+                """, (backup_table,))
+
+                if cur.fetchone() is None:
+                    break
+
+                backup_table = (
+                    f"attendance_history_legacy_backup_{counter}"
+                )
+                counter += 1
+
+            cur.execute(
+                f'ALTER TABLE attendance_history '
+                f'RENAME TO "{backup_table}"'
+            )
+
+            cur.execute("""
+                CREATE TABLE attendance_history (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    user_id INTEGER,
+                    user_name TEXT,
+                    started_at TEXT,
+                    ended_at TEXT
+                )
+            """)
+
+            cur.execute(
+                f'PRAGMA table_info("{backup_table}")'
+            )
+
+            old_columns = [
+                row["name"]
+                for row in cur.fetchall()
+            ]
+
+            def old_expr(preferred, fallback=None, default="NULL"):
+                if preferred in old_columns:
+                    return f'"{preferred}"'
+                if fallback and fallback in old_columns:
+                    return f'"{fallback}"'
+                return default
+
+            user_id_expr = old_expr("user_id")
+            user_name_expr = old_expr(
+                "user_name",
+                fallback="display_name"
+            )
+            started_at_expr = old_expr("started_at")
+            ended_at_expr = old_expr("ended_at")
+
+            cur.execute(f"""
+                INSERT INTO attendance_history(
+                    user_id,
+                    user_name,
+                    started_at,
+                    ended_at
+                )
+                SELECT
+                    {user_id_expr},
+                    {user_name_expr},
+                    {started_at_expr},
+                    {ended_at_expr}
+                FROM "{backup_table}"
+            """)
+
+            print(
+                "✅ attendance_history a fost migrat la schema nouă. "
+                f"Backup: {backup_table}"
+            )
+
+        else:
+
+            # Schema este deja compatibilă. Adăugăm doar coloanele
+            # opționale lipsă, dacă este cazul.
+            if "user_name" not in history_columns:
+                cur.execute("""
+                    ALTER TABLE attendance_history
+                    ADD COLUMN user_name TEXT
+                """)
+
+            if "started_at" not in history_columns:
+                cur.execute("""
+                    ALTER TABLE attendance_history
+                    ADD COLUMN started_at TEXT
+                """)
+
+            if "ended_at" not in history_columns:
+                cur.execute("""
+                    ALTER TABLE attendance_history
+                    ADD COLUMN ended_at TEXT
+                """)
+
+    # Normalizăm timestamp-urile după migrare.
     cur.execute("""
         SELECT id, started_at, ended_at
         FROM attendance_history
@@ -275,6 +403,7 @@ def migrate_database():
     old_history_rows = cur.fetchall()
 
     for row in old_history_rows:
+
         formatted_started = format_timestamp(row["started_at"])
         formatted_ended = format_timestamp(row["ended_at"])
 
@@ -282,6 +411,7 @@ def migrate_database():
             formatted_started != row["started_at"]
             or formatted_ended != row["ended_at"]
         ):
+
             cur.execute("""
                 UPDATE attendance_history
                 SET started_at = ?, ended_at = ?

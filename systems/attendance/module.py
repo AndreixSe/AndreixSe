@@ -1,4 +1,3 @@
-import uuid
 import discord
 
 from core.bot import bot
@@ -243,19 +242,15 @@ class AttendanceView(discord.ui.View):
 
             ended_at = now_string()
 
-            session_id = str(uuid.uuid4())
-
             cur.execute("""
                 INSERT INTO attendance_history(
-                    session_id,
                     user_id,
                     user_name,
                     started_at,
                     ended_at
                 )
-                VALUES (?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?)
             """, (
-                session_id,
                 existing["user_id"],
                 existing["user_name"]
                 or interaction.user.display_name,
