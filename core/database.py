@@ -421,6 +421,50 @@ def migrate_database():
                 row["id"]
             ))
 
+
+    # -----------------------------------------------------
+    # DAILY ATTENDANCE SESSIONS
+    # -----------------------------------------------------
+
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS attendance_days (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            attendance_date TEXT NOT NULL,
+            status TEXT NOT NULL DEFAULT 'open',
+            created_at TEXT NOT NULL,
+            closed_at TEXT,
+            channel_id INTEGER,
+            message_id INTEGER
+        )
+    """)
+
+    cur.execute("""
+        CREATE INDEX IF NOT EXISTS idx_attendance_days_date
+        ON attendance_days(attendance_date)
+    """)
+
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS attendance_daily_entries (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            day_id INTEGER NOT NULL,
+            user_id INTEGER NOT NULL,
+            user_name TEXT,
+            started_at TEXT NOT NULL,
+            ended_at TEXT,
+            FOREIGN KEY(day_id) REFERENCES attendance_days(id)
+        )
+    """)
+
+    cur.execute("""
+        CREATE INDEX IF NOT EXISTS idx_attendance_daily_entries_day
+        ON attendance_daily_entries(day_id)
+    """)
+
+    cur.execute("""
+        CREATE INDEX IF NOT EXISTS idx_attendance_daily_entries_user
+        ON attendance_daily_entries(day_id, user_id)
+    """)
+
     # -----------------------------------------------------
     # PATROLS
     # -----------------------------------------------------

@@ -1,113 +1,271 @@
 import discord
+from datetime import datetime
 
 from core.bot import bot
-from core.database import (
-    get_db,
-    get_setting,
-    set_setting,
-    format_timestamp,
-    now_string,
-)
+from core.database import get_db, now_string
 
 
 # =========================================================
-# ATTENDANCE HELPERS
+# HELPERS
 # =========================================================
 
-def cleanup_attendance_duplicates():
-    """
-    Păstrează un singur pontaj activ pentru fiecare utilizator.
+def today_string():
+    return datetime.now().strftime("%d.%m.%Y")
 
-    Dacă există duplicate vechi în baza de date, este păstrată
-    înregistrarea cu cel mai mic ID, iar restul sunt șterse.
-    """
 
-    conn = get_db()
-    cur = conn.cursor()
-
+def time_only(value):
+    if not value:
+        return "-"
+    value = str(value)
     try:
-        cur.execute("""
-            DELETE FROM attendance
-            WHERE id NOT IN (
-                SELECT MIN(id)
-                FROM attendance
-                GROUP BY user_id
-            )
-        """)
-
-        conn.commit()
-
-    except Exception as error:
-        conn.rollback()
-        print(f"❌ Eroare curățare duplicate pontaj: {error}")
-
-    finally:
-        conn.close()
+        return datetime.strptime(value, "%d.%m.%Y %H:%M:%S").strftime("%H:%M:%S")
+    except ValueError:
+        try:
+            return datetime.fromisoformat(value).strftime("%H:%M:%S")
+        except ValueError:
+            return value
 
 
-def create_attendance_embed():
+def duration_text(started_at, ended_at=None):
+    if not started_at:
+        return "-"
 
-    # Curățăm eventualele duplicate vechi.
-    cleanup_attendance_duplicates()
+    def parse(value):
+        if not value:
+            return datetime.now()
+        value = str(value)
+        try:
+            return datetime.strptime(value, "%d.%m.%Y %H:%M:%S")
+        except ValueError:
+            try:
+                return datetime.fromisoformat(value)
+            except ValueError:
+                return None
 
+    start = parse(started_at)
+    end = parse(ended_at)
+
+    if not start or not end:
+        return "-"
+
+    seconds = max(0, int((end - start).total_seconds()))
+    hours, rem = divmod(seconds, 3600)
+    minutes, _ = divmod(rem, 60)
+
+    if hours:
+        return f"{hours}h {minutes}m"
+    return f"{minutes}m"
+
+
+def get_day(day_id):
     conn = get_db()
     cur = conn.cursor()
+    cur.execute("SELECT * FROM attendance_days WHERE id = ?", (day_id,))
+    row = cur.fetchone()
+    conn.close()
+    return row
 
+
+def get_latest_today_day():
+    conn = get_db()
+    cur = conn.cursor()
     cur.execute("""
         SELECT *
-        FROM attendance
-        ORDER BY started_at ASC
-    """)
-
-    rows = cur.fetchall()
-
+        FROM attendance_days
+        WHERE attendance_date = ?
+        ORDER BY id DESC
+        LIMIT 1
+    """, (today_string(),))
+    row = cur.fetchone()
     conn.close()
+    return row
 
-    embed = discord.Embed(
-        title="🕐 PONTAJ",
-        color=discord.Color.green()
-    )
 
-    if not rows:
-        embed.description = "Nu este nimeni pontat momentan."
-        return embed
+def get_latest_open_day():
+    conn = get_db()
+    cur = conn.cursor()
+    cur.execute("""
+        SELECT *
+        FROM attendance_days
+        WHERE status = 'open'
+        ORDER BY id DESC
+        LIMIT 1
+    """)
+    row = cur.fetchone()
+    conn.close()
+    return row
 
-    lines = []
 
-    # Protecție suplimentară la afișare.
-    seen_users = set()
+def get_entries(day_id):
+    conn = get_db()
+    cur = conn.cursor()
+    cur.execute("""
+        SELECT *
+        FROM attendance_daily_entries
+        WHERE day_id = ?
+        ORDER BY started_at ASC, id ASC
+    """, (day_id,))
+    rows = cur.fetchall()
+    conn.close()
+    return rows
 
-    for row in rows:
 
-        user_id = row["user_id"]
+def create_daily_embed(day_id):
+    day = get_day(day_id)
 
-        if user_id in seen_users:
-            continue
-
-        seen_users.add(user_id)
-
-        lines.append(
-            f"👤 <@{user_id}> — "
-            f"🟢 {format_timestamp(row['started_at'])}"
+    if not day:
+        return discord.Embed(
+            title="🕐 PONTAJ ZILNIC",
+            description="❌ Pontajul nu mai există.",
+            color=discord.Color.red()
         )
 
-    embed.description = "\n".join(lines)
+    entries = get_entries(day_id)
+    active = [row for row in entries if not row["ended_at"]]
+    finished = [row for row in entries if row["ended_at"]]
+
+    is_open = day["status"] == "open"
+
+    embed = discord.Embed(
+        title="🕐 PONTAJ ZILNIC",
+        description=(
+            f"📅 **Data:** {day['attendance_date']}\n"
+            f"{'🟢 **Status:** DESCHIS' if is_open else '🔒 **Status:** ÎNCHEIAT'}"
+        ),
+        color=discord.Color.green() if is_open else discord.Color.red()
+    )
+
+    embed.add_field(
+        name="📊 Situație",
+        value=(
+            f"👥 Participanți: **{len(entries)}**\n"
+            f"🟢 Încă pontați: **{len(active)}**\n"
+            f"✅ Au încheiat: **{len(finished)}**"
+        ),
+        inline=False
+    )
+
+    if entries:
+        lines = []
+        for row in entries:
+            if row["ended_at"]:
+                lines.append(
+                    f"👤 <@{row['user_id']}> • "
+                    f"`{time_only(row['started_at'])}` → "
+                    f"`{time_only(row['ended_at'])}`"
+                )
+            else:
+                lines.append(
+                    f"👤 <@{row['user_id']}> • "
+                    f"🟢 de la `{time_only(row['started_at'])}`"
+                )
+
+        text = "\n".join(lines)
+        if len(text) > 3800:
+            text = text[:3750] + "\n…"
+
+        embed.add_field(
+            name="👥 Pontajul zilei",
+            value=text,
+            inline=False
+        )
+    else:
+        embed.add_field(
+            name="👥 Pontajul zilei",
+            value="Nu s-a pontat nimeni încă.",
+            inline=False
+        )
+
+    if not is_open:
+        embed.add_field(
+            name="🔴 Închis la",
+            value=f"`{time_only(day['closed_at'])}`",
+            inline=False
+        )
+
+    embed.set_footer(
+        text="Pontaj zilnic • fiecare panou rămâne ca evidență"
+    )
+
+    return embed
+
+
+def create_history_embed(day_id):
+    day = get_day(day_id)
+    entries = get_entries(day_id)
+
+    embed = discord.Embed(
+        title="📋 ISTORIC PONTAJ — ZILNIC",
+        description=(
+            f"📅 **Data:** {day['attendance_date']}\n"
+            "Sunt afișate doar înregistrările acestui pontaj."
+        ),
+        color=discord.Color.blue()
+    )
+
+    if not entries:
+        embed.add_field(
+            name="ℹ️ Istoric",
+            value="Nu există înregistrări pentru această zi.",
+            inline=False
+        )
+        return embed
+
+    for row in entries[:25]:
+        if row["ended_at"]:
+            status = (
+                f"🟢 Intrare: `{time_only(row['started_at'])}`\n"
+                f"🔴 Ieșire: `{time_only(row['ended_at'])}`\n"
+                f"⏱️ Durată: **{duration_text(row['started_at'], row['ended_at'])}**"
+            )
+        else:
+            status = (
+                f"🟢 Intrare: `{time_only(row['started_at'])}`\n"
+                f"🟡 Ieșire: **Încă pontat**\n"
+                f"⏱️ Durată curentă: **{duration_text(row['started_at'])}**"
+            )
+
+        display_name = row["user_name"] or f"<@{row['user_id']}>"
+        embed.add_field(
+            name=f"👤 {display_name}",
+            value=status,
+            inline=False
+        )
+
+    if len(entries) > 25:
+        embed.set_footer(
+            text=f"Sunt afișate primele 25 din {len(entries)} înregistrări."
+        )
 
     return embed
 
 
 # =========================================================
-# ATTENDANCE VIEW
+# VIEW
 # =========================================================
 
 class AttendanceView(discord.ui.View):
-
-    def __init__(self):
+    def __init__(self, day_id=None):
         super().__init__(timeout=None)
+        self.day_id = day_id
 
-    # -----------------------------------------------------
-    # START
-    # -----------------------------------------------------
+    async def resolve_day(self, interaction):
+        if self.day_id:
+            return get_day(self.day_id)
+
+        # Compatibilitate cu view-ul persistent înregistrat la pornirea botului.
+        conn = get_db()
+        cur = conn.cursor()
+        cur.execute("""
+            SELECT *
+            FROM attendance_days
+            WHERE message_id = ?
+            ORDER BY id DESC
+            LIMIT 1
+        """, (interaction.message.id,))
+        day = cur.fetchone()
+        conn.close()
+        return day
 
     @discord.ui.button(
         label="Începe pontaj",
@@ -115,87 +273,72 @@ class AttendanceView(discord.ui.View):
         emoji="🟢",
         custom_id="attendance_start"
     )
-    async def start_attendance(
-        self,
-        interaction: discord.Interaction,
-        button: discord.ui.Button
-    ):
+    async def start_attendance(self, interaction, button):
+        await interaction.response.defer(ephemeral=True)
 
-        # Răspundem imediat către Discord.
-        await interaction.response.defer(
-            ephemeral=True
-        )
+        day = await self.resolve_day(interaction)
+
+        if not day:
+            await interaction.followup.send(
+                "❌ Acest panou nu mai este asociat unui pontaj.",
+                ephemeral=True
+            )
+            return
+
+        if day["status"] != "open":
+            await interaction.followup.send(
+                "🔒 Pontajul acestei zile este încheiat. Nu te mai poți ponta aici.",
+                ephemeral=True
+            )
+            return
 
         conn = get_db()
         cur = conn.cursor()
 
         try:
-
-            cur.execute(
-                """
+            cur.execute("""
                 SELECT *
-                FROM attendance
-                WHERE user_id = ?
+                FROM attendance_daily_entries
+                WHERE day_id = ? AND user_id = ?
                 LIMIT 1
-                """,
-                (interaction.user.id,)
-            )
+            """, (day["id"], interaction.user.id))
 
-            existing = cur.fetchone()
-
-            if existing:
-
+            if cur.fetchone():
                 await interaction.followup.send(
-                    "❌ Ești deja pontat.",
+                    "❌ Ai fost deja pontat în acest pontaj zilnic.",
                     ephemeral=True
                 )
-
                 return
 
             cur.execute("""
-                INSERT INTO attendance(
-                    user_id,
-                    user_name,
-                    started_at
+                INSERT INTO attendance_daily_entries(
+                    day_id, user_id, user_name, started_at, ended_at
                 )
-                VALUES (?, ?, ?)
+                VALUES (?, ?, ?, ?, NULL)
             """, (
+                day["id"],
                 interaction.user.id,
                 interaction.user.display_name,
                 now_string()
             ))
-
             conn.commit()
 
         except Exception as error:
-
             conn.rollback()
-
-            print(
-                f"❌ Eroare pornire pontaj pentru "
-                f"{interaction.user.id}: {error}"
-            )
-
+            print(f"❌ Eroare pornire pontaj zilnic: {error}")
             await interaction.followup.send(
                 "❌ A apărut o eroare la pornirea pontajului.",
                 ephemeral=True
             )
-
             return
-
         finally:
             conn.close()
 
-        await update_attendance_panel()
-
+        await update_daily_panel(day["id"])
         await interaction.followup.send(
             "✅ Ai început pontajul.",
             ephemeral=True
         )
-
-    # -----------------------------------------------------
-    # STOP
-    # -----------------------------------------------------
 
     @discord.ui.button(
         label="Încheie pontaj",
@@ -203,303 +346,252 @@ class AttendanceView(discord.ui.View):
         emoji="🔴",
         custom_id="attendance_stop"
     )
-    async def stop_attendance(
-        self,
-        interaction: discord.Interaction,
-        button: discord.ui.Button
-    ):
+    async def stop_attendance(self, interaction, button):
+        await interaction.response.defer(ephemeral=True)
 
-        await interaction.response.defer(
-            ephemeral=True
-        )
+        day = await self.resolve_day(interaction)
+
+        if not day:
+            await interaction.followup.send(
+                "❌ Acest panou nu mai este asociat unui pontaj.",
+                ephemeral=True
+            )
+            return
+
+        if day["status"] != "open":
+            await interaction.followup.send(
+                "🔒 Pontajul acestei zile este deja încheiat.",
+                ephemeral=True
+            )
+            return
 
         conn = get_db()
         cur = conn.cursor()
 
         try:
-
-            cur.execute(
-                """
+            cur.execute("""
                 SELECT *
-                FROM attendance
-                WHERE user_id = ?
-                ORDER BY started_at ASC
+                FROM attendance_daily_entries
+                WHERE day_id = ? AND user_id = ?
                 LIMIT 1
-                """,
-                (interaction.user.id,)
-            )
+            """, (day["id"], interaction.user.id))
+            entry = cur.fetchone()
 
-            existing = cur.fetchone()
-
-            if not existing:
-
+            if not entry:
                 await interaction.followup.send(
-                    "❌ Nu ești pontat.",
+                    "❌ Nu ești pontat în acest pontaj.",
                     ephemeral=True
                 )
-
                 return
 
-            ended_at = now_string()
+            if entry["ended_at"]:
+                await interaction.followup.send(
+                    "❌ Ai încheiat deja pontajul.",
+                    ephemeral=True
+                )
+                return
 
             cur.execute("""
-                INSERT INTO attendance_history(
-                    user_id,
-                    user_name,
-                    started_at,
-                    ended_at
-                )
-                VALUES (?, ?, ?, ?)
-            """, (
-                existing["user_id"],
-                existing["user_name"]
-                or interaction.user.display_name,
-
-                existing["started_at"],
-                ended_at
-            ))
-
-            # Ștergem TOATE eventualele duplicate ale utilizatorului.
-            cur.execute(
-                """
-                DELETE FROM attendance
-                WHERE user_id = ?
-                """,
-                (interaction.user.id,)
-            )
-
+                UPDATE attendance_daily_entries
+                SET ended_at = ?
+                WHERE id = ?
+            """, (now_string(), entry["id"]))
             conn.commit()
 
         except Exception as error:
-
             conn.rollback()
-
-            print(
-                f"❌ Eroare oprire pontaj pentru "
-                f"{interaction.user.id}: {error}"
-            )
-
+            print(f"❌ Eroare încheiere pontaj membru: {error}")
             await interaction.followup.send(
                 "❌ A apărut o eroare la încheierea pontajului.",
                 ephemeral=True
             )
-
             return
-
         finally:
             conn.close()
 
-        await update_attendance_panel()
-
+        await update_daily_panel(day["id"])
         await interaction.followup.send(
             "✅ Ai încheiat pontajul.",
             ephemeral=True
         )
 
 
-# =========================================================
-# UPDATE ATTENDANCE PANEL
-# =========================================================
-
-async def update_attendance_panel():
-
-    channel_id = get_setting(
-        "attendance_panel_channel_id"
-    )
-
-    message_id = get_setting(
-        "attendance_panel_message_id"
-    )
-
-    if not channel_id or not message_id:
+async def update_daily_panel(day_id):
+    day = get_day(day_id)
+    if not day or not day["channel_id"] or not day["message_id"]:
         return
 
     try:
-
-        channel = bot.get_channel(
-            int(channel_id)
-        )
-
+        channel = bot.get_channel(int(day["channel_id"]))
         if channel is None:
+            channel = await bot.fetch_channel(int(day["channel_id"]))
 
-            try:
-                channel = await bot.fetch_channel(
-                    int(channel_id)
-                )
-
-            except Exception:
-                return
-
-        message = await channel.fetch_message(
-            int(message_id)
-        )
-
+        message = await channel.fetch_message(int(day["message_id"]))
         await message.edit(
-            embed=create_attendance_embed(),
-            view=AttendanceView()
+            embed=create_daily_embed(day_id),
+            view=AttendanceView(day_id)
         )
-
-    except discord.NotFound:
-
-        print(
-            "⚠️ Mesajul panoului de pontaj "
-            "nu mai există."
-        )
-
-    except discord.Forbidden:
-
-        print(
-            "❌ Botul nu are permisiunea de a "
-            "actualiza panoul de pontaj."
-        )
-
     except Exception as error:
-
-        print(
-            f"❌ Eroare panou pontaj: {error}"
-        )
+        print(f"❌ Eroare actualizare panou zilnic {day_id}: {error}")
 
 
 # =========================================================
-# SETUP PONTAJ
+# COMMANDS
 # =========================================================
 
 @bot.tree.command(
     name="setup_pontaj",
-    description="Creează panoul de pontaj în canalul curent."
+    description="Creează un pontaj nou pentru ziua curentă."
 )
-async def setup_pontaj(
-    interaction: discord.Interaction
-):
-
-    # Discord primește răspuns imediat și nu mai afișează
-    # "Aplicația nu a răspuns".
-    await interaction.response.defer(
-        ephemeral=True
-    )
-
-    try:
-
-        embed = create_attendance_embed()
-
-        message = await interaction.channel.send(
-            embed=embed,
-            view=AttendanceView()
-        )
-
-        set_setting(
-            "attendance_panel_channel_id",
-            str(interaction.channel.id)
-        )
-
-        set_setting(
-            "attendance_panel_message_id",
-            str(message.id)
-        )
-
-        await interaction.followup.send(
-            "✅ Panoul de pontaj a fost creat.",
-            ephemeral=True
-        )
-
-    except Exception as error:
-
-        print(
-            f"❌ Eroare setup pontaj: {error}"
-        )
-
-        await interaction.followup.send(
-            "❌ Panoul de pontaj nu a putut fi creat.",
-            ephemeral=True
-        )
-
-
-# =========================================================
-# PONTAJ
-# =========================================================
-
-@bot.tree.command(
-    name="pontaj",
-    description="Afișează persoanele pontate."
-)
-async def pontaj(
-    interaction: discord.Interaction
-):
-
-    embed = create_attendance_embed()
-
-    await interaction.response.send_message(
-        embed=embed,
-        ephemeral=True
-    )
-
-
-# =========================================================
-# ISTORIC PONTAJ
-# =========================================================
-
-@bot.tree.command(
-    name="istoric_pontaj",
-    description="Afișează istoricul pontajului."
-)
-async def istoric_pontaj(
-    interaction: discord.Interaction
-):
-
-    await interaction.response.defer(
-        ephemeral=True
-    )
+async def setup_pontaj(interaction: discord.Interaction):
+    await interaction.response.defer(ephemeral=True)
 
     conn = get_db()
     cur = conn.cursor()
 
     try:
+        # Cerință: setup-ul poate fi rulat zilnic și nu este blocat de
+        # pontajele/panourile anterioare. Fiecare rulare creează o sesiune nouă.
+        cur.execute("""
+            INSERT INTO attendance_days(
+                attendance_date,
+                status,
+                created_at,
+                channel_id
+            )
+            VALUES (?, 'open', ?, ?)
+        """, (
+            today_string(),
+            now_string(),
+            interaction.channel.id
+        ))
+        day_id = cur.lastrowid
+        conn.commit()
+
+        message = await interaction.channel.send(
+            embed=create_daily_embed(day_id),
+            view=AttendanceView(day_id)
+        )
 
         cur.execute("""
-            SELECT *
-            FROM attendance_history
-            ORDER BY id DESC
-            LIMIT 20
-        """)
+            UPDATE attendance_days
+            SET message_id = ?
+            WHERE id = ?
+        """, (message.id, day_id))
+        conn.commit()
 
-        rows = cur.fetchall()
-
+    except Exception as error:
+        conn.rollback()
+        print(f"❌ Eroare setup pontaj zilnic: {error}")
+        await interaction.followup.send(
+            "❌ Panoul de pontaj nu a putut fi creat.",
+            ephemeral=True
+        )
+        return
     finally:
         conn.close()
 
-    if not rows:
-
-        await interaction.followup.send(
-            "❌ Nu există pontaje în istoric.",
-            ephemeral=True
-        )
-
-        return
-
-    embed = discord.Embed(
-        title="📋 ISTORIC PONTAJ",
-        color=discord.Color.blue()
+    await interaction.followup.send(
+        f"✅ Pontajul pentru **{today_string()}** a fost creat.",
+        ephemeral=True
     )
 
-    for row in rows:
 
-        user_name = (
-            row["user_name"]
-            or f"<@{row['user_id']}>"
-        )
+@bot.tree.command(
+    name="incheie_pontaj",
+    description="Închide pontajul zilnic curent fără să șteargă evidența."
+)
+@discord.app_commands.default_permissions(manage_guild=True)
+async def incheie_pontaj(interaction: discord.Interaction):
+    await interaction.response.defer(ephemeral=True)
 
-        embed.add_field(
-            name=f"👤 {user_name}",
-            value=(
-                f"🟢 Început: "
-                f"{format_timestamp(row['started_at']) or '-'}\n"
-                f"🔴 Sfârșit: "
-                f"{format_timestamp(row['ended_at']) or '-'}"
-            ),
-            inline=False
+    day = get_latest_open_day()
+
+    if not day:
+        await interaction.followup.send(
+            "❌ Nu există niciun pontaj deschis.",
+            ephemeral=True
         )
+        return
+
+    conn = get_db()
+    cur = conn.cursor()
+
+    try:
+        closed_at = now_string()
+
+        # Persoanele care încă sunt pontate sunt închise automat la ora
+        # închiderii generale, astfel istoricul rămâne complet.
+        cur.execute("""
+            UPDATE attendance_daily_entries
+            SET ended_at = ?
+            WHERE day_id = ? AND ended_at IS NULL
+        """, (closed_at, day["id"]))
+
+        cur.execute("""
+            UPDATE attendance_days
+            SET status = 'closed', closed_at = ?
+            WHERE id = ?
+        """, (closed_at, day["id"]))
+
+        conn.commit()
+    except Exception as error:
+        conn.rollback()
+        print(f"❌ Eroare închidere pontaj zilnic: {error}")
+        await interaction.followup.send(
+            "❌ Pontajul nu a putut fi închis.",
+            ephemeral=True
+        )
+        return
+    finally:
+        conn.close()
+
+    await update_daily_panel(day["id"])
 
     await interaction.followup.send(
-        embed=embed,
+        f"🔒 Pontajul din **{day['attendance_date']}** a fost închis. "
+        "Panoul și evidența au rămas salvate.",
+        ephemeral=True
+    )
+
+
+@bot.tree.command(
+    name="pontaj",
+    description="Afișează ultimul pontaj creat astăzi."
+)
+async def pontaj(interaction: discord.Interaction):
+    day = get_latest_today_day()
+
+    if not day:
+        await interaction.response.send_message(
+            "❌ Nu există încă un pontaj creat pentru astăzi.",
+            ephemeral=True
+        )
+        return
+
+    await interaction.response.send_message(
+        embed=create_daily_embed(day["id"]),
+        ephemeral=True
+    )
+
+
+@bot.tree.command(
+    name="istoric_pontaj",
+    description="Afișează istoricul detaliat al pontajului de astăzi."
+)
+async def istoric_pontaj(interaction: discord.Interaction):
+    await interaction.response.defer(ephemeral=True)
+
+    day = get_latest_today_day()
+
+    if not day:
+        await interaction.followup.send(
+            "❌ Nu există pontaj pentru ziua de astăzi.",
+            ephemeral=True
+        )
+        return
+
+    await interaction.followup.send(
+        embed=create_history_embed(day["id"]),
         ephemeral=True
     )
