@@ -2,7 +2,7 @@ import discord
 from discord import app_commands
 
 from core.bot import bot
-from core.database import get_db, get_setting, set_setting, now_string
+from core.database import get_db, get_setting, set_setting, now_string, now
 
 # =========================================================
 # ROLURI DONAȚII
@@ -92,7 +92,16 @@ def donation_create_access_message():
 # DONAȚII - DATABASE
 # =========================================================
 
+def get_current_donation_session_id():
+    return get_setting("donation_session_id")
+
+
 def get_donations():
+
+    session_id = get_current_donation_session_id()
+
+    if not session_id:
+        return []
 
     conn = get_db()
     cur = conn.cursor()
@@ -100,9 +109,10 @@ def get_donations():
     cur.execute("""
         SELECT *
         FROM donations
+        WHERE session_id = ?
         ORDER BY id DESC
         LIMIT 20
-    """)
+    """, (session_id,))
 
     rows = cur.fetchall()
 
@@ -412,9 +422,10 @@ async def update_donation_panel():
         if not donations:
 
             embed = discord.Embed(
-                title="🎁 DONAȚII",
+                title="🎁 ISTORIC DONAȚII",
                 description=(
-                    "Nu există donații înregistrate."
+                    f"📅 **{now().strftime('%d.%m.%Y')}**\n\n"
+                    "Nu există donații în această sesiune."
                 ),
                 color=discord.Color.dark_grey()
             )
@@ -485,10 +496,14 @@ async def setup_donatii(
     interaction: discord.Interaction
 ):
 
+    session_id = now().strftime("%Y%m%d%H%M%S%f")
+    set_setting("donation_session_id", session_id)
+
     embed = discord.Embed(
-        title="🎁 PANOU DONAȚII",
+        title="🎁 ISTORIC DONAȚII",
         description=(
-            "Nu există donații înregistrate."
+            f"📅 **{now().strftime('%d.%m.%Y')}**\n\n"
+            "Nu există donații în această sesiune."
         ),
         color=discord.Color.dark_grey()
     )
@@ -546,7 +561,7 @@ async def donatie(
         "donation_panel_channel_id"
     )
 
-    if not panel_channel_id:
+    if not panel_channel_id or not get_current_donation_session_id():
 
         await interaction.response.send_message(
             "❌ Panoul de donații nu este configurat.\n"
@@ -580,16 +595,18 @@ async def donatie(
             items,
             items_count,
             status,
-            created_at
+            created_at,
+            session_id
         )
-        VALUES (?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
     """, (
         interaction.user.id,
         interaction.user.display_name,
         obiecte,
         numar,
         "pending",
-        now_string()
+        now_string(),
+        get_current_donation_session_id()
     ))
 
     donation_id = cur.lastrowid
@@ -652,7 +669,7 @@ async def donatii(
     if not donations:
 
         await interaction.response.send_message(
-            "❌ Nu există donații înregistrate.",
+            "❌ Nu există donații în sesiunea curentă.",
             ephemeral=True
         )
 
@@ -660,6 +677,7 @@ async def donatii(
 
     embed = discord.Embed(
         title="🎁 ISTORIC DONAȚII",
+        description=f"📅 **{now().strftime('%d.%m.%Y')}**",
         color=discord.Color.gold()
     )
 

@@ -557,9 +557,22 @@ def migrate_database():
             created_at TEXT,
             confirmed_at TEXT,
             confirmed_by_id INTEGER,
-            confirmed_by_name TEXT
+            confirmed_by_name TEXT,
+            session_id TEXT
         )
     """)
+
+    cur.execute("PRAGMA table_info(donations)")
+    donation_columns = [
+        row["name"]
+        for row in cur.fetchall()
+    ]
+
+    if "session_id" not in donation_columns:
+        cur.execute("""
+            ALTER TABLE donations
+            ADD COLUMN session_id TEXT
+        """)
 
     # -----------------------------------------------------
     # DEFAULT SETTINGS
@@ -574,6 +587,7 @@ def migrate_database():
 
         "donation_panel_channel_id": "",
         "donation_panel_message_id": "",
+        "donation_session_id": "",
     }
 
     for key, value in defaults.items():
