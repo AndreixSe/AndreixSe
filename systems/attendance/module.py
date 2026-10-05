@@ -6,6 +6,41 @@ from core.database import get_db, now_string
 
 
 # =========================================================
+# ATTENDANCE ROLE ACCESS
+# =========================================================
+
+ROLE_DISCORD_MOD = 1554072182735511623
+ROLE_LIDER = 1528799552075989102
+ROLE_CO_LIDER = 1527919721629089862
+ROLE_MIEMBRO = 1528804522938597557
+
+ATTENDANCE_ADMIN_ROLES = {
+    ROLE_DISCORD_MOD,
+    ROLE_LIDER,
+    ROLE_CO_LIDER,
+}
+
+ATTENDANCE_MEMBER_ROLES = ATTENDANCE_ADMIN_ROLES | {
+    ROLE_MIEMBRO,
+}
+
+
+def has_any_role(member, allowed_role_ids):
+    return any(
+        role.id in allowed_role_ids
+        for role in getattr(member, "roles", [])
+    )
+
+
+def is_attendance_admin(member):
+    return has_any_role(member, ATTENDANCE_ADMIN_ROLES)
+
+
+def can_use_attendance(member):
+    return has_any_role(member, ATTENDANCE_MEMBER_ROLES)
+
+
+# =========================================================
 # HELPERS
 # =========================================================
 
@@ -276,6 +311,13 @@ class AttendanceView(discord.ui.View):
     async def start_attendance(self, interaction, button):
         await interaction.response.defer(ephemeral=True)
 
+        if not can_use_attendance(interaction.user):
+            await interaction.followup.send(
+                "❌ Nu ai rolul necesar pentru a folosi pontajul.",
+                ephemeral=True
+            )
+            return
+
         day = await self.resolve_day(interaction)
 
         if not day:
@@ -348,6 +390,13 @@ class AttendanceView(discord.ui.View):
     )
     async def stop_attendance(self, interaction, button):
         await interaction.response.defer(ephemeral=True)
+
+        if not can_use_attendance(interaction.user):
+            await interaction.followup.send(
+                "❌ Nu ai rolul necesar pentru a folosi pontajul.",
+                ephemeral=True
+            )
+            return
 
         day = await self.resolve_day(interaction)
 
@@ -446,6 +495,13 @@ async def update_daily_panel(day_id):
 async def setup_pontaj(interaction: discord.Interaction):
     await interaction.response.defer(ephemeral=True)
 
+    if not is_attendance_admin(interaction.user):
+        await interaction.followup.send(
+            "❌ Doar Lider, Co-Lider sau Discord Mod poate crea pontajul.",
+            ephemeral=True
+        )
+        return
+
     conn = get_db()
     cur = conn.cursor()
 
@@ -501,9 +557,15 @@ async def setup_pontaj(interaction: discord.Interaction):
     name="incheie_pontaj",
     description="Închide pontajul zilnic curent fără să șteargă evidența."
 )
-@discord.app_commands.default_permissions(manage_guild=True)
 async def incheie_pontaj(interaction: discord.Interaction):
     await interaction.response.defer(ephemeral=True)
+
+    if not is_attendance_admin(interaction.user):
+        await interaction.followup.send(
+            "❌ Doar Lider, Co-Lider sau Discord Mod poate închide pontajul.",
+            ephemeral=True
+        )
+        return
 
     day = get_latest_open_day()
 
@@ -560,6 +622,13 @@ async def incheie_pontaj(interaction: discord.Interaction):
     description="Afișează ultimul pontaj creat astăzi."
 )
 async def pontaj(interaction: discord.Interaction):
+    if not is_attendance_admin(interaction.user):
+        await interaction.response.send_message(
+            "❌ Doar Lider, Co-Lider sau Discord Mod poate folosi această comandă.",
+            ephemeral=True
+        )
+        return
+
     day = get_latest_today_day()
 
     if not day:
@@ -581,6 +650,13 @@ async def pontaj(interaction: discord.Interaction):
 )
 async def istoric_pontaj(interaction: discord.Interaction):
     await interaction.response.defer(ephemeral=True)
+
+    if not is_attendance_admin(interaction.user):
+        await interaction.followup.send(
+            "❌ Doar Lider, Co-Lider sau Discord Mod poate vedea istoricul.",
+            ephemeral=True
+        )
+        return
 
     day = get_latest_today_day()
 
