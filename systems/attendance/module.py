@@ -1,12 +1,54 @@
 import discord
+
 from core.bot import bot
-from core.database import get_db, get_setting, set_setting, format_timestamp, now_string
+from core.database import (
+    get_db,
+    get_setting,
+    set_setting,
+    format_timestamp,
+    now_string,
+)
+
 
 # =========================================================
-# ATTENDANCE
+# ATTENDANCE HELPERS
 # =========================================================
+
+def cleanup_attendance_duplicates():
+    """
+    Păstrează un singur pontaj activ pentru fiecare utilizator.
+
+    Dacă există duplicate vechi în baza de date, este păstrată
+    înregistrarea cu cel mai mic ID, iar restul sunt șterse.
+    """
+
+    conn = get_db()
+    cur = conn.cursor()
+
+    try:
+        cur.execute("""
+            DELETE FROM attendance
+            WHERE id NOT IN (
+                SELECT MIN(id)
+                FROM attendance
+                GROUP BY user_id
+            )
+        """)
+
+        conn.commit()
+
+    except Exception as error:
+        conn.rollback()
+        print(f"❌ Eroare curățare duplicate pontaj: {error}")
+
+    finally:
+        conn.close()
+
 
 def create_attendance_embed():
+
+    # Curățăm eventualele duplicate vechi.
+    cleanup_attendance_duplicates()
 
     conn = get_db()
     cur = conn.cursor()
@@ -27,36 +69,45 @@ def create_attendance_embed():
     )
 
     if not rows:
-
-        embed.description = (
-            "Nu este nimeni pontat momentan."
-        )
-
+        embed.description = "Nu este nimeni pontat momentan."
         return embed
 
     lines = []
 
+    # Protecție suplimentară la afișare.
+    seen_users = set()
+
     for row in rows:
 
+        user_id = row["user_id"]
+
+        if user_id in seen_users:
+            continue
+
+        seen_users.add(user_id)
+
         lines.append(
-            f"👤 <@{row['user_id']}> — "
+            f"👤 <@{user_id}> — "
             f"🟢 {format_timestamp(row['started_at'])}"
         )
 
-    embed.description = "\n".join(
-        lines
-    )
+    embed.description = "\n".join(lines)
 
     return embed
 
 
+# =========================================================
+# ATTENDANCE VIEW
+# =========================================================
+
 class AttendanceView(discord.ui.View):
 
     def __init__(self):
+        super().__init__(timeout=None)
 
-        super().__init__(
-            timeout=None
-        )
+    # -----------------------------------------------------
+    # START
+    # -----------------------------------------------------
 
     @discord.ui.button(
         label="Începe pontaj",
@@ -70,49 +121,81 @@ class AttendanceView(discord.ui.View):
         button: discord.ui.Button
     ):
 
+        # Răspundem imediat către Discord.
+        await interaction.response.defer(
+            ephemeral=True
+        )
+
         conn = get_db()
         cur = conn.cursor()
 
-        cur.execute(
-            "SELECT * FROM attendance WHERE user_id = ?",
-            (interaction.user.id,)
-        )
+        try:
 
-        existing = cur.fetchone()
+            cur.execute(
+                """
+                SELECT *
+                FROM attendance
+                WHERE user_id = ?
+                LIMIT 1
+                """,
+                (interaction.user.id,)
+            )
 
-        if existing:
+            existing = cur.fetchone()
 
-            conn.close()
+            if existing:
 
-            await interaction.response.send_message(
-                "❌ Ești deja pontat.",
+                await interaction.followup.send(
+                    "❌ Ești deja pontat.",
+                    ephemeral=True
+                )
+
+                return
+
+            cur.execute("""
+                INSERT INTO attendance(
+                    user_id,
+                    user_name,
+                    started_at
+                )
+                VALUES (?, ?, ?)
+            """, (
+                interaction.user.id,
+                interaction.user.display_name,
+                now_string()
+            ))
+
+            conn.commit()
+
+        except Exception as error:
+
+            conn.rollback()
+
+            print(
+                f"❌ Eroare pornire pontaj pentru "
+                f"{interaction.user.id}: {error}"
+            )
+
+            await interaction.followup.send(
+                "❌ A apărut o eroare la pornirea pontajului.",
                 ephemeral=True
             )
 
             return
 
-        cur.execute("""
-            INSERT INTO attendance(
-                user_id,
-                user_name,
-                started_at
-            )
-            VALUES (?, ?, ?)
-        """, (
-            interaction.user.id,
-            interaction.user.display_name,
-            now_string()
-        ))
-
-        conn.commit()
-        conn.close()
+        finally:
+            conn.close()
 
         await update_attendance_panel()
 
-        await interaction.response.send_message(
+        await interaction.followup.send(
             "✅ Ai început pontajul.",
             ephemeral=True
         )
+
+    # -----------------------------------------------------
+    # STOP
+    # -----------------------------------------------------
 
     @discord.ui.button(
         label="Încheie pontaj",
@@ -126,59 +209,97 @@ class AttendanceView(discord.ui.View):
         button: discord.ui.Button
     ):
 
+        await interaction.response.defer(
+            ephemeral=True
+        )
+
         conn = get_db()
         cur = conn.cursor()
 
-        cur.execute(
-            "SELECT * FROM attendance WHERE user_id = ?",
-            (interaction.user.id,)
-        )
+        try:
 
-        existing = cur.fetchone()
+            cur.execute(
+                """
+                SELECT *
+                FROM attendance
+                WHERE user_id = ?
+                ORDER BY started_at ASC
+                LIMIT 1
+                """,
+                (interaction.user.id,)
+            )
 
-        if not existing:
+            existing = cur.fetchone()
 
-            conn.close()
+            if not existing:
 
-            await interaction.response.send_message(
-                "❌ Nu ești pontat.",
+                await interaction.followup.send(
+                    "❌ Nu ești pontat.",
+                    ephemeral=True
+                )
+
+                return
+
+            ended_at = now_string()
+
+            cur.execute("""
+                INSERT INTO attendance_history(
+                    user_id,
+                    user_name,
+                    started_at,
+                    ended_at
+                )
+                VALUES (?, ?, ?, ?)
+            """, (
+                existing["user_id"],
+                existing["user_name"]
+                or interaction.user.display_name,
+
+                existing["started_at"],
+                ended_at
+            ))
+
+            # Ștergem TOATE eventualele duplicate ale utilizatorului.
+            cur.execute(
+                """
+                DELETE FROM attendance
+                WHERE user_id = ?
+                """,
+                (interaction.user.id,)
+            )
+
+            conn.commit()
+
+        except Exception as error:
+
+            conn.rollback()
+
+            print(
+                f"❌ Eroare oprire pontaj pentru "
+                f"{interaction.user.id}: {error}"
+            )
+
+            await interaction.followup.send(
+                "❌ A apărut o eroare la încheierea pontajului.",
                 ephemeral=True
             )
 
             return
 
-        ended_at = now_string()
-
-        cur.execute("""
-            INSERT INTO attendance_history(
-                user_id,
-                user_name,
-                started_at,
-                ended_at
-            )
-            VALUES (?, ?, ?, ?)
-        """, (
-            existing["user_id"],
-            existing["user_name"] or interaction.user.display_name,
-            format_timestamp(existing["started_at"]),
-            ended_at
-        ))
-
-        cur.execute(
-            "DELETE FROM attendance WHERE user_id = ?",
-            (interaction.user.id,)
-        )
-
-        conn.commit()
-        conn.close()
+        finally:
+            conn.close()
 
         await update_attendance_panel()
 
-        await interaction.response.send_message(
+        await interaction.followup.send(
             "✅ Ai încheiat pontajul.",
             ephemeral=True
         )
 
+
+# =========================================================
+# UPDATE ATTENDANCE PANEL
+# =========================================================
 
 async def update_attendance_panel():
 
@@ -200,7 +321,14 @@ async def update_attendance_panel():
         )
 
         if channel is None:
-            return
+
+            try:
+                channel = await bot.fetch_channel(
+                    int(channel_id)
+                )
+
+            except Exception:
+                return
 
         message = await channel.fetch_message(
             int(message_id)
@@ -211,12 +339,25 @@ async def update_attendance_panel():
             view=AttendanceView()
         )
 
-    except Exception as e:
+    except discord.NotFound:
 
         print(
-            f"❌ Eroare panou pontaj: {e}"
+            "⚠️ Mesajul panoului de pontaj "
+            "nu mai există."
         )
 
+    except discord.Forbidden:
+
+        print(
+            "❌ Botul nu are permisiunea de a "
+            "actualiza panoul de pontaj."
+        )
+
+    except Exception as error:
+
+        print(
+            f"❌ Eroare panou pontaj: {error}"
+        )
 
 
 # =========================================================
@@ -231,28 +372,46 @@ async def setup_pontaj(
     interaction: discord.Interaction
 ):
 
-    embed = create_attendance_embed()
-
-    message = await interaction.channel.send(
-        embed=embed,
-        view=AttendanceView()
-    )
-
-    set_setting(
-        "attendance_panel_channel_id",
-        str(interaction.channel.id)
-    )
-
-    set_setting(
-        "attendance_panel_message_id",
-        str(message.id)
-    )
-
-    await interaction.response.send_message(
-        "✅ Panoul de pontaj a fost creat.",
+    # Discord primește răspuns imediat și nu mai afișează
+    # "Aplicația nu a răspuns".
+    await interaction.response.defer(
         ephemeral=True
     )
 
+    try:
+
+        embed = create_attendance_embed()
+
+        message = await interaction.channel.send(
+            embed=embed,
+            view=AttendanceView()
+        )
+
+        set_setting(
+            "attendance_panel_channel_id",
+            str(interaction.channel.id)
+        )
+
+        set_setting(
+            "attendance_panel_message_id",
+            str(message.id)
+        )
+
+        await interaction.followup.send(
+            "✅ Panoul de pontaj a fost creat.",
+            ephemeral=True
+        )
+
+    except Exception as error:
+
+        print(
+            f"❌ Eroare setup pontaj: {error}"
+        )
+
+        await interaction.followup.send(
+            "❌ Panoul de pontaj nu a putut fi creat.",
+            ephemeral=True
+        )
 
 
 # =========================================================
@@ -287,23 +446,30 @@ async def istoric_pontaj(
     interaction: discord.Interaction
 ):
 
+    await interaction.response.defer(
+        ephemeral=True
+    )
+
     conn = get_db()
     cur = conn.cursor()
 
-    cur.execute("""
-        SELECT *
-        FROM attendance_history
-        ORDER BY id DESC
-        LIMIT 20
-    """)
+    try:
 
-    rows = cur.fetchall()
+        cur.execute("""
+            SELECT *
+            FROM attendance_history
+            ORDER BY id DESC
+            LIMIT 20
+        """)
 
-    conn.close()
+        rows = cur.fetchall()
+
+    finally:
+        conn.close()
 
     if not rows:
 
-        await interaction.response.send_message(
+        await interaction.followup.send(
             "❌ Nu există pontaje în istoric.",
             ephemeral=True
         )
@@ -317,18 +483,23 @@ async def istoric_pontaj(
 
     for row in rows:
 
+        user_name = (
+            row["user_name"]
+            or f"<@{row['user_id']}>"
+        )
+
         embed.add_field(
-            name=f"👤 {row['user_name'] or f"<@{row['user_id']}>"}",
+            name=f"👤 {user_name}",
             value=(
-                f"🟢 Început: {format_timestamp(row['started_at']) or '-'}\n"
-                f"🔴 Sfârșit: {format_timestamp(row['ended_at']) or '-'}"
+                f"🟢 Început: "
+                f"{format_timestamp(row['started_at']) or '-'}\n"
+                f"🔴 Sfârșit: "
+                f"{format_timestamp(row['ended_at']) or '-'}"
             ),
             inline=False
         )
 
-    await interaction.response.send_message(
+    await interaction.followup.send(
         embed=embed,
         ephemeral=True
     )
-
-
