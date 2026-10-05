@@ -103,15 +103,9 @@ async def save_patrol_image(channel, attachment):
     if attachment is None:
         return None
 
-    try:
-        file = await attachment.to_file()
-        message = await channel.send(content="📸 Poza patrulei", file=file)
-        if message.attachments:
-            return message.attachments[0].url
-    except Exception as e:
-        print(f"❌ Eroare salvare poza: {e}")
-
-    return None
+    # Folosim direct URL-ul attachment-ului Discord.
+    # Poza va apărea numai în panoul patrulei.
+    return attachment.url
 
 
 async def finish_patrol(patrol_id):
