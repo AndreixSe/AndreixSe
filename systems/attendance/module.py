@@ -486,6 +486,12 @@ async def update_daily_panel(day_id):
             embed=create_daily_embed(day_id),
             view=AttendanceView(day_id)
         )
+    except discord.NotFound as error:
+        # Mesajul a fost sters din Discord; pastram evidenta in baza de date.
+        if error.code == 10008:
+            print(f"ℹ️ Panoul vechi #{day_id} nu mai exista pe Discord; datele raman salvate.")
+        else:
+            print(f"❌ Eroare Discord la panoul zilnic {day_id}: {error}")
     except Exception as error:
         print(f"❌ Eroare actualizare panou zilnic {day_id}: {error}")
 
