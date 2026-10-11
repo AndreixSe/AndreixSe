@@ -579,6 +579,37 @@ def migrate_database():
         """)
 
     # -----------------------------------------------------
+    # EVIDENTA M/J - sesiuni lunare manuale si activitati
+    # Tabele separate: donatiile vechi raman intacte.
+    # -----------------------------------------------------
+
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS mining_sessions (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            started_at TEXT NOT NULL,
+            ended_at TEXT,
+            channel_id INTEGER NOT NULL
+        )
+    """)
+
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS mining_entries (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            session_id INTEGER NOT NULL,
+            created_at TEXT NOT NULL,
+            people TEXT NOT NULL,
+            sulfur INTEGER NOT NULL DEFAULT 0,
+            iron INTEGER NOT NULL DEFAULT 0,
+            buds INTEGER NOT NULL DEFAULT 0,
+            joints INTEGER NOT NULL DEFAULT 0,
+            responsible_id INTEGER NOT NULL,
+            message_id INTEGER,
+            FOREIGN KEY (session_id) REFERENCES mining_sessions(id)
+        )
+    """)
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_mining_entries_session ON mining_entries(session_id)")
+
+    # -----------------------------------------------------
     # DEFAULT SETTINGS
     # -----------------------------------------------------
 

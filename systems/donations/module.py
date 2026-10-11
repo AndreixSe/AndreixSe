@@ -1,710 +1,216 @@
+"""Evidență M/J. Înlocuiește fostul modul de donații, fără a șterge datele vechi."""
+
 import discord
 from discord import app_commands
 
 from core.bot import bot
-from core.database import get_db, get_setting, set_setting, now_string, now
+from core.database import get_db, get_setting, set_setting, now, now_string
 
-# =========================================================
-# ROLURI DONAȚII
-# =========================================================
+ROLE_LIDER = 1528799552075989102
+ROLE_CO_LIDER = 1527919721629089862
+ROLE_DISCORD_MOD = 1554072182735511623
+ROLE_RESPONSABIL_MINERIT = 1558935590823796817
 
-# Acces TOTAL la sistemul de donații:
-# - /setup_donatii
-# - /donatii
-# - butonul ✅ PRIMITĂ
-# - butonul ❌ NEPRIMITĂ
-# - /donatie
-DONATION_FULL_ACCESS_ROLE_IDS = {
-    1527919721629089862,  # Co-Lider
-    1528799552075989102,  # Lider
-    1554072182735511623,  # Discord Mod
-}
+SETUP_ROLES = {ROLE_LIDER, ROLE_CO_LIDER, ROLE_DISCORD_MOD}
+MINING_ROLES = SETUP_ROLES | {ROLE_RESPONSABIL_MINERIT}
+SESSION_SETTING = "mining_current_session_id"
 
 
-# Acces pentru CREAREA unei donații:
-# - /donatie
-DONATION_CREATE_ROLE_IDS = {
-    1527919721629089862,  # Co-Lider
-    1528799552075989102,  # Lider
-    1554072182735511623,  # Discord Mod
-    1528804522938597557,  # Miembro
-}
-
-
-def has_donation_full_access(
-    interaction: discord.Interaction
-) -> bool:
-
-    if not interaction.guild:
-        return False
-
-    member = interaction.user
-
-    if not isinstance(member, discord.Member):
-        return False
-
-    return any(
-        role.id in DONATION_FULL_ACCESS_ROLE_IDS
-        for role in member.roles
-    )
-
-
-def has_donation_create_access(
-    interaction: discord.Interaction
-) -> bool:
-
-    if not interaction.guild:
-        return False
-
-    member = interaction.user
-
-    if not isinstance(member, discord.Member):
-        return False
-
-    return any(
-        role.id in DONATION_CREATE_ROLE_IDS
-        for role in member.roles
-    )
-
-
-def donation_full_access_message():
-
+def has_role(interaction: discord.Interaction, roles: set[int]) -> bool:
     return (
-        "❌ **Nu ai acces la această funcție.**\n\n"
-        "Ai nevoie de unul dintre gradele:\n"
-        "👑 **Lider**\n"
-        "🛡️ **Co-Lider**\n"
-        "🔧 **Discord Mod**"
+        interaction.guild is not None
+        and isinstance(interaction.user, discord.Member)
+        and any(role.id in roles for role in interaction.user.roles)
     )
 
 
-def donation_create_access_message():
-
-    return (
-        "❌ **Nu ai acces la această funcție.**\n\n"
-        "Pentru a crea o donație ai nevoie de gradul:\n"
-        "👤 **Miembro**\n\n"
-        "Lider, Co-Lider și Discord Mod au de asemenea acces."
-    )
+def fmt(value: int) -> str:
+    return f"{value:,}".replace(",", ".")
 
 
-# =========================================================
-# DONAȚII - DATABASE
-# =========================================================
-
-def get_current_donation_session_id():
-    return get_setting("donation_session_id")
-
-
-def get_donations():
-
-    session_id = get_current_donation_session_id()
-
-    if not session_id:
-        return []
-
+def current_session():
+    raw = get_setting(SESSION_SETTING)
+    if not raw:
+        return None
     conn = get_db()
-    cur = conn.cursor()
-
-    cur.execute("""
-        SELECT *
-        FROM donations
-        WHERE session_id = ?
-        ORDER BY id DESC
-        LIMIT 20
-    """, (session_id,))
-
-    rows = cur.fetchall()
-
-    conn.close()
-
-    return rows
+    try:
+        return conn.execute("SELECT * FROM mining_sessions WHERE id = ? AND ended_at IS NULL", (raw,)).fetchone()
+    finally:
+        conn.close()
 
 
-def get_donation(donation_id):
-
+def session_totals(session_id: int):
     conn = get_db()
-    cur = conn.cursor()
-
-    cur.execute("""
-        SELECT *
-        FROM donations
-        WHERE id = ?
-    """, (donation_id,))
-
-    row = cur.fetchone()
-
-    conn.close()
-
-    return row
+    try:
+        return conn.execute("""
+            SELECT COUNT(*) AS activities,
+                   COALESCE(SUM(sulfur), 0) AS sulfur,
+                   COALESCE(SUM(iron), 0) AS iron,
+                   COALESCE(SUM(buds), 0) AS buds,
+                   COALESCE(SUM(joints), 0) AS joints
+            FROM mining_entries WHERE session_id = ?
+        """, (session_id,)).fetchone()
+    finally:
+        conn.close()
 
 
-# =========================================================
-# DONAȚII - EMBED
-# =========================================================
-
-def create_donation_embed(donation):
-
-    if donation["status"] == "received":
-
-        status_text = "✅ PRIMITĂ"
-        embed_color = discord.Color.green()
-
-    else:
-
-        status_text = "❌ NEPRIMITĂ"
-        embed_color = discord.Color.red()
-
-    donor_mention = (
-        f"<@{donation['donor_id']}>"
-    )
-
-    embed = discord.Embed(
-        title=f"🎁 DONAȚIA #{donation['id']}",
-        color=embed_color
-    )
-
-    embed.add_field(
-        name="👤 DONATOR",
-        value=donor_mention,
-        inline=False
-    )
-
-    embed.add_field(
-        name="📦 OBIECTE",
-        value=donation["items"] or "-",
-        inline=False
-    )
-
-    embed.add_field(
-        name="🔢 NUMĂR",
-        value=str(
-            donation["items_count"] or 0
-        ),
-        inline=True
-    )
-
-    embed.add_field(
-        name="📌 STATUS",
-        value=status_text,
-        inline=True
-    )
-
-    embed.add_field(
-        name="📅 DATA",
-        value=donation["created_at"] or "-",
-        inline=True
-    )
-
-    if donation["status"] == "received":
-
-        embed.add_field(
-            name="✅ PRIMITĂ DE",
-            value=(
-                donation["confirmed_by_name"]
-                or "-"
-            ),
-            inline=False
-        )
-
-        embed.add_field(
-            name="🕐 CONFIRMATĂ LA",
-            value=(
-                donation["confirmed_at"]
-                or "-"
-            ),
-            inline=False
-        )
-
-    embed.set_footer(
-        text="Sistem donații"
-    )
-
+def history_embed(session_id: int, final: bool = False):
+    totals = session_totals(session_id)
+    conn = get_db()
+    try:
+        session = conn.execute("SELECT * FROM mining_sessions WHERE id = ?", (session_id,)).fetchone()
+    finally:
+        conn.close()
+    label = "🔒 ISTORIC FINAL M/J" if final else "📊 ISTORIC M/J"
+    embed = discord.Embed(title=label, color=discord.Color.gold())
+    if session:
+        embed.description = f"📅 Evidență începută la: **{session['started_at']}** (ora României)"
+    embed.add_field(name="🟡 TOTAL SULF", value=fmt(totals["sulfur"]), inline=False)
+    embed.add_field(name="⚙️ TOTAL FIER", value=fmt(totals["iron"]), inline=False)
+    embed.add_field(name="🌿 TOTAL MUGURI", value=fmt(totals["buds"]), inline=False)
+    embed.add_field(name="🚬 TOTAL JOINTURI", value=fmt(totals["joints"]), inline=False)
+    embed.add_field(name="📋 Activități înregistrate", value=str(totals["activities"]), inline=False)
+    if final:
+        embed.add_field(name="🔒 Evidență încheiată", value=now_string(), inline=False)
+    embed.set_footer(text="Dominicans • Evidență M/J")
     return embed
 
 
-# =========================================================
-# DONAȚII - VIEW
-# =========================================================
+def entry_embed(entry_id: int, people: str, sulfur: int, iron: int,
+                buds: int | None, joints: int | None, responsible_id: int, timestamp: str):
+    embed = discord.Embed(title=f"⛏️ EVIDENȚĂ M/J #{entry_id}", color=discord.Color.green())
+    embed.add_field(name="📅 Data", value=timestamp.split(" ")[0], inline=False)
+    embed.add_field(name="👥 Persoane prezente", value=people, inline=False)
+    embed.add_field(name="🟡 Sulf", value=fmt(sulfur), inline=True)
+    embed.add_field(name="⚙️ Fier", value=fmt(iron), inline=True)
+    embed.add_field(name="🌿 Muguri", value=fmt(buds) if buds is not None else "-", inline=True)
+    embed.add_field(name="🚬 Jointuri", value=fmt(joints) if joints is not None else "-", inline=True)
+    embed.add_field(name="👑 Responsabil", value=f"<@{responsible_id}>", inline=False)
+    embed.set_footer(text="Dominicans • Evidență M/J • ora României")
+    return embed
 
-class DonationItemView(discord.ui.View):
 
-    def __init__(self, donation_id):
-
-        super().__init__(
-            timeout=None
-        )
-
-        self.donation_id = donation_id
-
-        self.received_button.custom_id = (
-            f"donation_received_{donation_id}"
-        )
-
-        self.not_received_button.custom_id = (
-            f"donation_not_received_{donation_id}"
-        )
-
-    @discord.ui.button(
-        label="PRIMITĂ",
-        style=discord.ButtonStyle.success,
-        emoji="✅"
-    )
-    async def received_button(
-        self,
-        interaction: discord.Interaction,
-        button: discord.ui.Button
-    ):
-
-        if not has_donation_full_access(interaction):
-
-            await interaction.response.send_message(
-                donation_full_access_message(),
-                ephemeral=True
-            )
-
-            return
-
-        donation = get_donation(
-            self.donation_id
-        )
-
-        if donation is None:
-
-            await interaction.response.send_message(
-                "❌ Donația nu mai există.",
-                ephemeral=True
-            )
-
-            return
-
-        if donation["status"] == "received":
-
-            await interaction.response.send_message(
-                "❌ Această donație este deja marcată ca primită.",
-                ephemeral=True
-            )
-
-            return
+@bot.tree.command(name="setup_minerit", description="Încheie evidența M/J precedentă și începe una nouă.")
+async def setup_minerit(interaction: discord.Interaction):
+    if not has_role(interaction, SETUP_ROLES):
+        await interaction.response.send_message("❌ Doar Lider, Co-Lider sau Discord Mod poate începe o evidență M/J.", ephemeral=True)
+        return
+    await interaction.response.defer(ephemeral=True)
+    old = current_session()
+    try:
+        # Publicăm istoricul final înainte de resetare. Dacă Discord dă eroare,
+        # sesiunea veche rămâne activă și nu se pierde evidența.
+        if old:
+            await interaction.channel.send(embed=history_embed(old["id"], final=True))
 
         conn = get_db()
-        cur = conn.cursor()
+        try:
+            cur = conn.cursor()
+            cur.execute("BEGIN IMMEDIATE")
+            if old:
+                cur.execute("UPDATE mining_sessions SET ended_at = ? WHERE id = ? AND ended_at IS NULL",
+                            (now_string(), old["id"]))
+            cur.execute("INSERT INTO mining_sessions(started_at, channel_id) VALUES (?, ?)",
+                        (now_string(), interaction.channel_id))
+            new_id = cur.lastrowid
+            cur.execute("""
+                INSERT INTO settings(key, value) VALUES (?, ?)
+                ON CONFLICT(key) DO UPDATE SET value = excluded.value
+            """, (SESSION_SETTING, str(new_id)))
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
 
-        cur.execute("""
-            UPDATE donations
-            SET
-                status = 'received',
-                confirmed_at = ?,
-                confirmed_by_id = ?,
-                confirmed_by_name = ?
-            WHERE id = ?
-        """, (
-            now_string(),
-            interaction.user.id,
-            interaction.user.display_name,
-            self.donation_id
-        ))
+        await interaction.channel.send(embed=history_embed(new_id))
+        await interaction.followup.send("✅ Evidența M/J nouă a început. Totalurile sunt de la zero; istoricul vechi a rămas salvat.", ephemeral=True)
+    except (discord.Forbidden, discord.HTTPException) as error:
+        await interaction.followup.send(f"❌ Nu am putut publica panoul în canal. Verifică permisiunile botului. ({error})", ephemeral=True)
+    except Exception as error:
+        print(f"❌ Eroare setup M/J: {error}")
+        await interaction.followup.send("❌ Eroare la crearea evidenței M/J. Verifică logurile Railway.", ephemeral=True)
 
-        conn.commit()
-        conn.close()
 
-        updated_donation = get_donation(
-            self.donation_id
-        )
+@bot.tree.command(name="minerit", description="Înregistrează o activitate M/J cu participanți și cantități.")
+@app_commands.describe(
+    persoane="Persoanele prezente (poți scrie @mențiuni sau nume separate prin virgulă)",
+    sulf="Cantitatea totală de sulf a grupului",
+    fier="Cantitatea totală de fier a grupului",
+    muguri="Cantitatea de muguri (opțional; necompletat = -)",
+    jointuri="Cantitatea de jointuri (opțional; necompletat = -)",
+)
+async def minerit(interaction: discord.Interaction, persoane: str, sulf: int, fier: int,
+                  muguri: int | None = None, jointuri: int | None = None):
+    if not has_role(interaction, MINING_ROLES):
+        await interaction.response.send_message("❌ Nu ai rolul Responsabil Minerit, Lider, Co-Lider sau Discord Mod.", ephemeral=True)
+        return
+    if not persoane.strip() or len(persoane) > 1024:
+        await interaction.response.send_message("❌ Completează persoanele prezente (maximum 1024 caractere).", ephemeral=True)
+        return
+    values = (sulf, fier, muguri, jointuri)
+    if any(value is not None and value < 0 for value in values):
+        await interaction.response.send_message("❌ Cantitățile nu pot fi negative.", ephemeral=True)
+        return
+    if not any(value for value in values if value is not None):
+        await interaction.response.send_message("❌ Introdu cel puțin o cantitate mai mare decât zero.", ephemeral=True)
+        return
+    session = current_session()
+    if not session:
+        await interaction.response.send_message("❌ Nu există evidență M/J activă. Un Lider trebuie să folosească `/setup_minerit`.", ephemeral=True)
+        return
+    await interaction.response.defer(ephemeral=True)
+    timestamp = now_string()
+    try:
+        channel = bot.get_channel(int(session["channel_id"]))
+        if channel is None:
+            channel = await bot.fetch_channel(int(session["channel_id"]))
+        conn = get_db()
+        try:
+            cur = conn.cursor()
+            cur.execute("""
+                INSERT INTO mining_entries(session_id, created_at, people, sulfur, iron, buds, joints, responsible_id)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """, (session["id"], timestamp, persoane.strip(), sulf, fier,
+                  muguri or 0, jointuri or 0, interaction.user.id))
+            entry_id = cur.lastrowid
+            conn.commit()
+        finally:
+            conn.close()
 
         try:
+            message = await channel.send(embed=entry_embed(entry_id, persoane.strip(), sulf, fier,
+                                                             muguri, jointuri, interaction.user.id, timestamp))
+        except Exception:
+            # Nu lăsăm în totaluri o activitate pentru care nu s-a creat panoul.
+            conn = get_db()
+            try:
+                conn.execute("DELETE FROM mining_entries WHERE id = ?", (entry_id,))
+                conn.commit()
+            finally:
+                conn.close()
+            raise
 
-            await interaction.message.edit(
-                embed=create_donation_embed(
-                    updated_donation
-                ),
-                view=DonationItemView(
-                    self.donation_id
-                )
-            )
-
-        except Exception as e:
-
-            print(
-                f"❌ Eroare actualizare donație: {e}"
-            )
-
-        await interaction.response.send_message(
-            f"✅ Donația #{self.donation_id} "
-            f"a fost marcată ca **PRIMITĂ** de "
-            f"{interaction.user.mention}.",
-            ephemeral=True
-        )
-
-        await update_donation_panel()
-
-    @discord.ui.button(
-        label="NEPRIMITĂ",
-        style=discord.ButtonStyle.danger,
-        emoji="❌"
-    )
-    async def not_received_button(
-        self,
-        interaction: discord.Interaction,
-        button: discord.ui.Button
-    ):
-
-        if not has_donation_full_access(interaction):
-
-            await interaction.response.send_message(
-                donation_full_access_message(),
-                ephemeral=True
-            )
-
-            return
-
-        donation = get_donation(
-            self.donation_id
-        )
-
-        if donation is None:
-
-            await interaction.response.send_message(
-                "❌ Donația nu mai există.",
-                ephemeral=True
-            )
-
-            return
-
-        if donation["status"] == "received":
-
-            await interaction.response.send_message(
-                "❌ Donația este deja marcată ca primită.",
-                ephemeral=True
-            )
-
-            return
-
-        await interaction.response.send_message(
-            f"❌ Donația #{self.donation_id} "
-            f"este în continuare **NEPRIMITĂ**.",
-            ephemeral=True
-        )
+        conn = get_db()
+        try:
+            conn.execute("UPDATE mining_entries SET message_id = ? WHERE id = ?", (message.id, entry_id))
+            conn.commit()
+        finally:
+            conn.close()
+        await interaction.followup.send(f"✅ Activitatea M/J #{entry_id} a fost înregistrată în <#{session['channel_id']}>.", ephemeral=True)
+    except Exception as error:
+        print(f"❌ Eroare înregistrare M/J: {error}")
+        await interaction.followup.send("❌ Nu am putut publica activitatea. Verifică permisiunile și logurile Railway.", ephemeral=True)
 
 
-# =========================================================
-# DONAȚII - PANOU
-# =========================================================
-
-async def update_donation_panel():
-
-    channel_id = get_setting(
-        "donation_panel_channel_id"
-    )
-
-    message_id = get_setting(
-        "donation_panel_message_id"
-    )
-
-    if not channel_id or not message_id:
+@bot.tree.command(name="minerit_istoric", description="Arată totalurile M/J din evidența curentă.")
+async def minerit_istoric(interaction: discord.Interaction):
+    if not has_role(interaction, MINING_ROLES):
+        await interaction.response.send_message("❌ Nu ai acces la istoricul M/J.", ephemeral=True)
         return
-
-    try:
-
-        channel = bot.get_channel(
-            int(channel_id)
-        )
-
-        if channel is None:
-            return
-
-        message = await channel.fetch_message(
-            int(message_id)
-        )
-
-        donations = get_donations()
-
-        if not donations:
-
-            embed = discord.Embed(
-                title="🎁 ISTORIC DONAȚII",
-                description=(
-                    f"📅 **{now().strftime('%d.%m.%Y')}**\n\n"
-                    "Nu există donații în această sesiune."
-                ),
-                color=discord.Color.dark_grey()
-            )
-
-            await message.edit(
-                content=None,
-                embed=embed,
-                view=None
-            )
-
-            return
-
-        embed = discord.Embed(
-            title="🎁 PANOU DONAȚII",
-            description=(
-                "Mai jos sunt ultimele donații înregistrate."
-            ),
-            color=discord.Color.gold()
-        )
-
-        for donation in donations:
-
-            if donation["status"] == "received":
-
-                status = "✅ PRIMITĂ"
-
-            else:
-
-                status = "❌ NEPRIMITĂ"
-
-            embed.add_field(
-                name=(
-                    f"🎁 Donația #{donation['id']} "
-                    f"— {status}"
-                ),
-                value=(
-                    f"👤 <@{donation['donor_id']}>\n"
-                    f"📦 {donation['items'] or '-'}\n"
-                    f"🔢 {donation['items_count'] or 0} obiecte"
-                ),
-                inline=False
-            )
-
-        await message.edit(
-            content=None,
-            embed=embed,
-            view=None
-        )
-
-    except Exception as e:
-
-        print(
-            f"❌ Eroare panou donații: {e}"
-        )
-
-
-
-# =========================================================
-# SETUP DONAȚII
-# =========================================================
-
-@bot.tree.command(
-    name="setup_donatii",
-    description="Creează panoul de donații în canalul curent."
-)
-@app_commands.check(has_donation_full_access)
-async def setup_donatii(
-    interaction: discord.Interaction
-):
-
-    session_id = now().strftime("%Y%m%d%H%M%S%f")
-    set_setting("donation_session_id", session_id)
-
-    embed = discord.Embed(
-        title="🎁 ISTORIC DONAȚII",
-        description=(
-            f"📅 **{now().strftime('%d.%m.%Y')}**\n\n"
-            "Nu există donații în această sesiune."
-        ),
-        color=discord.Color.dark_grey()
-    )
-
-    message = await interaction.channel.send(
-        embed=embed
-    )
-
-    set_setting(
-        "donation_panel_channel_id",
-        str(interaction.channel.id)
-    )
-
-    set_setting(
-        "donation_panel_message_id",
-        str(message.id)
-    )
-
-    await interaction.response.send_message(
-        "✅ Panoul de donații a fost creat.",
-        ephemeral=True
-    )
-
-
-
-# =========================================================
-# DONAȚIE
-# =========================================================
-
-@bot.tree.command(
-    name="donatie",
-    description="Înregistrează o donație."
-)
-@app_commands.describe(
-    obiecte="Obiectele donate, separate prin virgulă",
-    numar="Numărul total de obiecte"
-)
-@app_commands.check(has_donation_create_access)
-async def donatie(
-    interaction: discord.Interaction,
-    obiecte: str,
-    numar: int
-):
-
-    if numar < 1:
-
-        await interaction.response.send_message(
-            "❌ Numărul de obiecte trebuie să fie cel puțin 1.",
-            ephemeral=True
-        )
-
+    session = current_session()
+    if not session:
+        await interaction.response.send_message("❌ Nu există evidență M/J activă. Folosește mai întâi `/setup_minerit`.", ephemeral=True)
         return
-
-    panel_channel_id = get_setting(
-        "donation_panel_channel_id"
-    )
-
-    if not panel_channel_id or not get_current_donation_session_id():
-
-        await interaction.response.send_message(
-            "❌ Panoul de donații nu este configurat.\n"
-            "Un Lider, Co-Lider sau Discord Mod trebuie "
-            "să ruleze mai întâi `/setup_donatii`.",
-            ephemeral=True
-        )
-
-        return
-
-    channel = bot.get_channel(
-        int(panel_channel_id)
-    )
-
-    if channel is None:
-
-        await interaction.response.send_message(
-            "❌ Nu am găsit canalul de donații.",
-            ephemeral=True
-        )
-
-        return
-
-    conn = get_db()
-    cur = conn.cursor()
-
-    cur.execute("""
-        INSERT INTO donations(
-            donor_id,
-            donor_name,
-            items,
-            items_count,
-            status,
-            created_at,
-            session_id
-        )
-        VALUES (?, ?, ?, ?, ?, ?, ?)
-    """, (
-        interaction.user.id,
-        interaction.user.display_name,
-        obiecte,
-        numar,
-        "pending",
-        now_string(),
-        get_current_donation_session_id()
-    ))
-
-    donation_id = cur.lastrowid
-
-    conn.commit()
-    conn.close()
-
-    donation = get_donation(
-        donation_id
-    )
-
-    try:
-
-        await channel.send(
-            embed=create_donation_embed(
-                donation
-            ),
-            view=DonationItemView(
-                donation_id
-            )
-        )
-
-    except Exception as e:
-
-        print(
-            f"❌ Eroare trimitere donație: {e}"
-        )
-
-        await interaction.response.send_message(
-            "❌ Donația a fost salvată în baza de date, "
-            "dar nu am putut trimite mesajul în canal.",
-            ephemeral=True
-        )
-
-        return
-
-    await update_donation_panel()
-
-    await interaction.response.send_message(
-        f"✅ Donația #{donation_id} a fost înregistrată cu succes.",
-        ephemeral=True
-    )
-
-
-# =========================================================
-# DONAȚII
-# =========================================================
-
-@bot.tree.command(
-    name="donatii",
-    description="Afișează ultimele donații."
-)
-@app_commands.check(has_donation_full_access)
-async def donatii(
-    interaction: discord.Interaction
-):
-
-    donations = get_donations()
-
-    if not donations:
-
-        await interaction.response.send_message(
-            "❌ Nu există donații în sesiunea curentă.",
-            ephemeral=True
-        )
-
-        return
-
-    embed = discord.Embed(
-        title="🎁 ISTORIC DONAȚII",
-        description=f"📅 **{now().strftime('%d.%m.%Y')}**",
-        color=discord.Color.gold()
-    )
-
-    for donation in donations:
-
-        if donation["status"] == "received":
-            status = "✅ PRIMITĂ"
-        else:
-            status = "❌ NEPRIMITĂ"
-
-        embed.add_field(
-            name=(
-                f"🎁 Donația #{donation['id']} "
-                f"— {status}"
-            ),
-            value=(
-                f"👤 <@{donation['donor_id']}>\n"
-                f"📦 {donation['items'] or '-'}\n"
-                f"🔢 {donation['items_count'] or 0} obiecte\n"
-                f"📅 {donation['created_at'] or '-'}"
-            ),
-            inline=False
-        )
-
-    await interaction.response.send_message(
-        embed=embed,
-        ephemeral=True
-    )
-
-
+    await interaction.response.send_message(embed=history_embed(session["id"]), ephemeral=True)
