@@ -6,15 +6,12 @@ from discord.ext import commands
 from core.bot import bot
 from core.database import migrate_database
 
-# Importurile înregistrează comenzile slash ale fiecărui sistem.
+# Importurile inregistreaza comenzile slash ale fiecarui sistem.
 from systems.patrol.module import PatrolView
 from systems.attendance.module import AttendanceView
-from systems.donations.module import (
-    DonationItemView,
-    get_donations,
-    donation_create_access_message,
-    donation_full_access_message,
-)
+# Importul modulului inregistreaza comenzile /setup_minerit, /minerit,
+# /minerit_istoric. Acest sistem nu foloseste butoane persistente.
+import systems.donations.module
 
 TOKEN = os.getenv("DISCORD_TOKEN")
 
@@ -27,11 +24,9 @@ async def on_ready():
     try:
         bot.add_view(PatrolView())
         bot.add_view(AttendanceView())
-        for donation in get_donations():
-            bot.add_view(DonationItemView(donation["id"]))
-        print("✅ View-urile persistente au fost încărcate.")
+        print("✅ View-urile persistente au fost incarcate.")
     except Exception as error:
-        print(f"❌ Eroare la încărcarea View-urilor: {error}")
+        print(f"❌ Eroare la incarcarea View-urilor: {error}")
 
     try:
         synced = await bot.tree.sync()
@@ -44,7 +39,7 @@ async def on_ready():
 async def on_command_error(ctx, error):
     if isinstance(error, commands.CommandNotFound):
         return
-    print(f"❌ Eroare comandă prefix: {error}")
+    print(f"❌ Eroare comanda prefix: {error}")
 
 
 @bot.tree.error
@@ -53,11 +48,9 @@ async def on_app_command_error(
     error: app_commands.AppCommandError,
 ):
     if isinstance(error, app_commands.CheckFailure):
-        command_name = interaction.command.name if interaction.command else ""
         message = (
-            donation_create_access_message()
-            if command_name == "donatie"
-            else donation_full_access_message()
+            "❌ Nu ai rolul necesar pentru aceasta comanda. "
+            "Verifica permisiunile pentru sistemul folosit."
         )
         if interaction.response.is_done():
             await interaction.followup.send(message, ephemeral=True)
@@ -70,6 +63,6 @@ async def on_app_command_error(
 
 if __name__ == "__main__":
     if not TOKEN:
-        raise RuntimeError("Variabila DISCORD_TOKEN nu este configurată.")
+        raise RuntimeError("Variabila DISCORD_TOKEN nu este configurata.")
     migrate_database()
     bot.run(TOKEN)
