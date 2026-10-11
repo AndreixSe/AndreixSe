@@ -1,5 +1,6 @@
+import asyncio
 import discord
-from datetime import datetime
+from datetime import datetime, date, time
 from zoneinfo import ZoneInfo
 
 from core.bot import bot
@@ -676,3 +677,123 @@ async def istoric_pontaj(interaction: discord.Interaction):
         embed=create_history_embed(day["id"]),
         ephemeral=True
     )
+
+
+# =========================================================
+# PROGRAM AUTOMAT PONTAJ - ORA ROMANIEI
+# Pornire: 12.10.2026, zilnic 19:45; inchidere: 00:00.
+# =========================================================
+
+AUTO_ATTENDANCE_CHANNEL_ID = 1556701325335732264
+AUTO_ATTENDANCE_START_DATE = date(2026, 10, 12)
+AUTO_ATTENDANCE_OPEN_TIME = time(19, 45)
+_auto_attendance_task = None
+
+
+async def _auto_close_previous_days():
+    # Inchide pontajele ramase deschise din zile anterioare.
+    today = today_string()
+    conn = get_db()
+    try:
+        cur = conn.cursor()
+        cur.execute("SELECT id, attendance_date FROM attendance_days WHERE status = 'open'")
+        previous = []
+        for row in cur.fetchall():
+            try:
+                day_date = datetime.strptime(row['attendance_date'], '%d.%m.%Y').date()
+            except (TypeError, ValueError):
+                continue
+            if day_date < romania_now().date():
+                previous.append(row['id'])
+
+        if not previous:
+            return
+
+        closed_at = now_string()
+        for day_id in previous:
+            cur.execute(
+                "UPDATE attendance_daily_entries SET ended_at = ? WHERE day_id = ? AND ended_at IS NULL",
+                (closed_at, day_id)
+            )
+            cur.execute(
+                "UPDATE attendance_days SET status = 'closed', closed_at = ? WHERE id = ? AND status = 'open'",
+                (closed_at, day_id)
+            )
+        conn.commit()
+    finally:
+        conn.close()
+
+    for day_id in previous:
+        await update_daily_panel(day_id)
+    print(f"✅ Pontaj automat: {len(previous)} panou/panouri inchise.")
+
+
+async def _auto_open_today():
+    # Creeaza maximum un panou automat pe zi, inclusiv dupa restart.
+    current = romania_now()
+    if current.date() < AUTO_ATTENDANCE_START_DATE or current.time() < AUTO_ATTENDANCE_OPEN_TIME:
+        return
+
+    # Daca exista deja un pontaj pentru astazi (manual sau automat), nu duplicam.
+    conn = get_db()
+    try:
+        cur = conn.cursor()
+        cur.execute('BEGIN IMMEDIATE')
+        cur.execute('SELECT id FROM attendance_days WHERE attendance_date = ? LIMIT 1', (today_string(),))
+        if cur.fetchone():
+            conn.commit()
+            return
+        cur.execute('''
+            INSERT INTO attendance_days(attendance_date, status, created_at, channel_id)
+            VALUES (?, 'open', ?, ?)
+        ''', (today_string(), now_string(), AUTO_ATTENDANCE_CHANNEL_ID))
+        day_id = cur.lastrowid
+        conn.commit()
+    finally:
+        conn.close()
+
+    try:
+        channel = bot.get_channel(AUTO_ATTENDANCE_CHANNEL_ID)
+        if channel is None:
+            channel = await bot.fetch_channel(AUTO_ATTENDANCE_CHANNEL_ID)
+        message = await channel.send(embed=create_daily_embed(day_id), view=AttendanceView(day_id))
+    except Exception:
+        # Permite reincearcarea la urmatoarea verificare daca trimiterea a esuat.
+        conn = get_db()
+        try:
+            conn.execute('DELETE FROM attendance_days WHERE id = ? AND message_id IS NULL', (day_id,))
+            conn.commit()
+        finally:
+            conn.close()
+        raise
+
+    conn = get_db()
+    try:
+        conn.execute('UPDATE attendance_days SET message_id = ? WHERE id = ?', (message.id, day_id))
+        conn.commit()
+    finally:
+        conn.close()
+    print(f"✅ Pontaj automat: panoul #{day_id} postat in canalul {AUTO_ATTENDANCE_CHANNEL_ID}.")
+
+
+async def _auto_attendance_loop():
+    while not bot.is_closed():
+        try:
+            # Recuperam automat inchiderile ratate daca Railway a fost oprit.
+            await _auto_close_previous_days()
+            await _auto_open_today()
+        except asyncio.CancelledError:
+            raise
+        except Exception as error:
+            print(f"❌ Eroare program automat pontaj: {error}")
+        await asyncio.sleep(20)
+
+
+async def _auto_attendance_on_ready():
+    global _auto_attendance_task
+    if _auto_attendance_task is None or _auto_attendance_task.done():
+        _auto_attendance_task = asyncio.create_task(_auto_attendance_loop())
+        print('🕐 Program pontaj automat activ: 19:45 - 00:00 (Europe/Bucharest).')
+
+
+bot.add_listener(_auto_attendance_on_ready, 'on_ready')
