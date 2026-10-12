@@ -1,6 +1,6 @@
 import asyncio
 import discord
-from datetime import datetime, date, time
+from datetime import datetime, date, time, timedelta
 from zoneinfo import ZoneInfo
 
 from core.bot import bot
@@ -697,26 +697,28 @@ _auto_attendance_task = None
 
 
 async def _auto_close_previous_days():
-    # Inchide pontajele ramase deschise din zile anterioare.
-    today = today_string()
+    # Folosim miezul noptii (ora Romaniei) ca ora oficiala de inchidere.
+    # Daca botul a fost oprit, recuperam inchiderea fara sa stergem istoricul.
+    current_date = romania_now().date()
     conn = get_db()
+    previous = []
     try:
         cur = conn.cursor()
         cur.execute("SELECT id, attendance_date FROM attendance_days WHERE status = 'open'")
-        previous = []
         for row in cur.fetchall():
             try:
                 day_date = datetime.strptime(row['attendance_date'], '%d.%m.%Y').date()
             except (TypeError, ValueError):
+                print(f"⚠️ Pontaj automat: data invalida pentru pontaj #{row['id']}.")
                 continue
-            if day_date < romania_now().date():
-                previous.append(row['id'])
+            if day_date < current_date:
+                previous.append((row['id'], day_date))
 
-        if not previous:
-            return
-
-        closed_at = now_string()
-        for day_id in previous:
+        for day_id, day_date in previous:
+            # Pontajul se inchide la inceputul zilei urmatoare, nu la ora
+            # la care Railway reuseste sa execute verificarea.
+            midnight = datetime.combine(day_date + timedelta(days=1), time.min)
+            closed_at = midnight.strftime('%d.%m.%Y %H:%M:%S')
             cur.execute(
                 "UPDATE attendance_daily_entries SET ended_at = ? WHERE day_id = ? AND ended_at IS NULL",
                 (closed_at, day_id)
@@ -726,73 +728,99 @@ async def _auto_close_previous_days():
                 (closed_at, day_id)
             )
         conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
     finally:
         conn.close()
 
-    for day_id in previous:
+    for day_id, _ in previous:
         await update_daily_panel(day_id)
-    print(f"✅ Pontaj automat: {len(previous)} panou/panouri inchise.")
+    if previous:
+        print(f"✅ Pontaj automat: {len(previous)} pontaj(e) inchise la 00:00 (ora Romaniei).")
 
 
 async def _auto_open_today():
-    # Creeaza maximum un panou automat pe zi, inclusiv dupa restart.
     current = romania_now()
     if current.date() < AUTO_ATTENDANCE_START_DATE or current.time() < AUTO_ATTENDANCE_OPEN_TIME:
         return
 
-    # Daca exista deja un pontaj pentru astazi (manual sau automat), nu duplicam.
     conn = get_db()
     try:
         cur = conn.cursor()
         cur.execute('BEGIN IMMEDIATE')
-        cur.execute('SELECT id FROM attendance_days WHERE attendance_date = ? LIMIT 1', (today_string(),))
-        if cur.fetchone():
-            conn.commit()
-            return
+        # Preferam panoul deja creat in canalul automat; daca exista unul
+        # manual astazi, il respectam pentru a nu crea duplicate.
         cur.execute('''
-            INSERT INTO attendance_days(attendance_date, status, created_at, channel_id)
-            VALUES (?, 'open', ?, ?)
-        ''', (today_string(), now_string(), AUTO_ATTENDANCE_CHANNEL_ID))
-        day_id = cur.lastrowid
+            SELECT * FROM attendance_days
+            WHERE attendance_date = ?
+            ORDER BY CASE WHEN channel_id = ? THEN 0 ELSE 1 END, id DESC
+            LIMIT 1
+        ''', (today_string(), AUTO_ATTENDANCE_CHANNEL_ID))
+        day = cur.fetchone()
+        if day is None:
+            cur.execute('''
+                INSERT INTO attendance_days(attendance_date, status, created_at, channel_id)
+                VALUES (?, 'open', ?, ?)
+            ''', (today_string(), now_string(), AUTO_ATTENDANCE_CHANNEL_ID))
+            day_id = cur.lastrowid
+            channel_id = AUTO_ATTENDANCE_CHANNEL_ID
+            message_id = None
+        else:
+            day_id = day['id']
+            channel_id = day['channel_id'] or AUTO_ATTENDANCE_CHANNEL_ID
+            message_id = day['message_id']
+            if day['status'] != 'open':
+                conn.commit()
+                return
         conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
     finally:
         conn.close()
 
-    try:
-        channel = bot.get_channel(AUTO_ATTENDANCE_CHANNEL_ID)
-        if channel is None:
-            channel = await bot.fetch_channel(AUTO_ATTENDANCE_CHANNEL_ID)
-        message = await channel.send(embed=create_daily_embed(day_id), view=AttendanceView(day_id))
-    except Exception:
-        # Permite reincearcarea la urmatoarea verificare daca trimiterea a esuat.
-        conn = get_db()
-        try:
-            conn.execute('DELETE FROM attendance_days WHERE id = ? AND message_id IS NULL', (day_id,))
-            conn.commit()
-        finally:
-            conn.close()
-        raise
+    channel = bot.get_channel(int(channel_id))
+    if channel is None:
+        channel = await bot.fetch_channel(int(channel_id))
 
+    if message_id:
+        try:
+            await channel.fetch_message(int(message_id))
+            return  # Panoul exista deja: nu postam duplicat.
+        except discord.NotFound:
+            print(f"⚠️ Pontaj automat: mesajul #{message_id} pentru ziua curenta lipseste; refac panoul.")
+        # Erorile Forbidden / HTTPException se raporteaza si se reincearca;
+        # nu presupunem ca panoul a disparut.
+
+    # Daca un send reuseste dar Railway se opreste inainte de salvarea ID-ului,
+    # Discord poate avea un mesaj orfan. Acesta este un caz rar care necesita
+    # verificare manuala; nu stergem niciodata inregistrarile din baza de date.
+    message = await channel.send(embed=create_daily_embed(day_id), view=AttendanceView(day_id))
     conn = get_db()
     try:
-        conn.execute('UPDATE attendance_days SET message_id = ? WHERE id = ?', (message.id, day_id))
+        conn.execute('UPDATE attendance_days SET message_id = ?, channel_id = ? WHERE id = ?',
+                     (message.id, int(channel_id), day_id))
         conn.commit()
     finally:
         conn.close()
-    print(f"✅ Pontaj automat: panoul #{day_id} postat in canalul {AUTO_ATTENDANCE_CHANNEL_ID}.")
+    print(f"✅ Pontaj automat: panoul #{day_id} publicat/recuperat in canalul {channel_id} (mesaj {message.id}).")
 
 
 async def _auto_attendance_loop():
     while not bot.is_closed():
         try:
-            # Recuperam automat inchiderile ratate daca Railway a fost oprit.
             await _auto_close_previous_days()
             await _auto_open_today()
         except asyncio.CancelledError:
             raise
         except Exception as error:
-            print(f"❌ Eroare program automat pontaj: {error}")
-        await asyncio.sleep(20)
+            print(f"❌ Eroare program automat pontaj: {type(error).__name__}: {error}")
+
+        # Verificam des, inclusiv la trecerea in ziua urmatoare.
+        # Nu garantam executia exact la secunda 00:00 daca Discord/Railway
+        # este indisponibil; ora salvata pentru inchidere ramane 00:00:00.
+        await asyncio.sleep(5)
 
 
 async def _auto_attendance_on_ready():
