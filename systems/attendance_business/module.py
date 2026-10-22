@@ -94,31 +94,48 @@ async def incepepontaj(interaction: discord.Interaction, poza: discord.Attachmen
         return
     try:
         channel = await output_channel(interaction)
-        # Salvăm o copie în canal: atașamentele mesajului de comandă pot dispărea.
+        # Fotografia este atașată DIRECT panoului, nu trimisă separat.
+        # attachment:// face ca Discord să o afișeze în embed, fără dublură.
+        import io
+        import os
         photo_bytes = await poza.read()
         if len(photo_bytes) > 8 * 1024 * 1024:
             await interaction.followup.send('❌ Fotografia depășește 8 MB.', ephemeral=True)
             return
-        filename = poza.filename or 'dovada.png'
-        proof = await channel.send(file=discord.File(__import__('io').BytesIO(photo_bytes), filename=filename))
-        permanent_url = proof.attachments[0].url
+        extension = os.path.splitext(poza.filename or '')[1].lower()
+        if extension not in {'.png', '.jpg', '.jpeg', '.webp', '.gif'}:
+            extension = '.png'
+        filename = f'dovada_pontaj_{interaction.id}{extension}'
         now = stamp(current_time())
         with get_db() as conn:
             cur = conn.execute(
                 'INSERT INTO business_attendance(user_id, user_name, started_at, photo_url, channel_id, proof_message_id) '
                 'VALUES (?, ?, ?, ?, ?, ?)',
-                (interaction.user.id, interaction.user.display_name, now, permanent_url, CHANNEL_ID, proof.id),
+                (interaction.user.id, interaction.user.display_name, now, None, CHANNEL_ID, None),
             )
             entry_id = cur.lastrowid
             row = conn.execute('SELECT * FROM business_attendance WHERE id = ?', (entry_id,)).fetchone()
+        embed = make_embed(row)
+        # Înlocuim doar câmpul foto din embed-ul inițial.
+        embed.remove_field(len(embed.fields) - 1)
+        embed.add_field(name='📸 Dovadă foto', value='Fotografia de la început', inline=False)
+        embed.set_image(url=f'attachment://{filename}')
         try:
-            message = await channel.send(embed=make_embed(row))
+            message = await channel.send(
+                embed=embed,
+                file=discord.File(io.BytesIO(photo_bytes), filename=filename),
+            )
         except Exception:
-            # Înregistrarea rămâne în DB și poate fi închisă; logăm eroarea.
-            log.exception('Nu s-a putut posta panoul Pontaj Afacere #%s', entry_id)
+            # Dacă publicarea eșuează, eliminăm doar intrarea nouă nepublicată.
+            with get_db() as conn:
+                conn.execute('DELETE FROM business_attendance WHERE id = ? AND message_id IS NULL', (entry_id,))
             raise
+        permanent_url = message.attachments[0].url if message.attachments else None
         with get_db() as conn:
-            conn.execute('UPDATE business_attendance SET message_id = ? WHERE id = ?', (message.id, entry_id))
+            conn.execute(
+                'UPDATE business_attendance SET message_id = ?, photo_url = ? WHERE id = ?',
+                (message.id, permanent_url, entry_id),
+            )
         await interaction.followup.send('✅ Ai început pontajul. Panoul mov a fost publicat.', ephemeral=True)
     except Exception:
         log.exception('Eroare /incepepontaj')
@@ -144,7 +161,10 @@ async def close_entry(interaction, target_id, hide_photo=False):
         channel = await output_channel(interaction)
         if row['message_id']:
             msg = await channel.fetch_message(int(row['message_id']))
-            await msg.edit(embed=make_embed(row))
+            embed = make_embed(row)
+            if row['photo_url'] and msg.attachments:
+                embed.set_image(url=f'attachment://{msg.attachments[0].filename}')
+            await msg.edit(embed=embed)
         else:
             msg = await channel.send(embed=make_embed(row))
             with get_db() as conn:
