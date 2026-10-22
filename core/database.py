@@ -635,6 +635,12 @@ def migrate_database():
         ON business_attendance(user_id, started_at)
     """)
 
+    # Pontaj Afacere: a doua fotografie (optională la închidere de admin).
+    cur.execute("PRAGMA table_info(business_attendance)")
+    business_columns = {row["name"] for row in cur.fetchall()}
+    if "end_photo_url" not in business_columns:
+        cur.execute("ALTER TABLE business_attendance ADD COLUMN end_photo_url TEXT")
+
     # -----------------------------------------------------
     # DEFAULT SETTINGS
     # -----------------------------------------------------
