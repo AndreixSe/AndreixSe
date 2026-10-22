@@ -116,41 +116,43 @@ async def close_entry(interaction, user_id, photo=None, omit=False):
     if not row:
         return await interaction.followup.send('❌ Membrul nu are pontaj activ.', ephemeral=True)
     try:
-        image_data = None
-        ext = None
-        if photo is not None:
-            image_data, ext = await read_image(photo)
-        elif not omit:
+        if photo is None and not omit:
             raise ValueError('Fotografia de încheiere este obligatorie.')
+        image_data, ext = await read_image(photo) if photo is not None else (None, None)
         ch = await channel()
-        msg = await ch.fetch_message(int(row['message_id']))
-        # Păstrăm doar atașamentele folosite de embed-uri.
-        start_attachment = next((a for a in msg.attachments if a.filename.startswith('pontaj_start_')), None)
-        # Discord poate returna zero attachments pentru imaginile deja incluse in embed.
-        # In acest caz folosim URL-ul salvat, fara a indexa o lista goala.
-        filename = f'pontaj_end_{interaction.id}{ext}' if image_data else None
+        msg = None
+        if row['message_id']:
+            try:
+                msg = await ch.fetch_message(int(row['message_id']))
+            except discord.NotFound:
+                log.warning('Panoul %s lipsește; îl recreez.', row['message_id'])
+        filename = f'pontaj_end_{interaction.id}{ext}' if image_data is not None else None
+        files = [discord.File(io.BytesIO(image_data), filename=filename)] if filename else []
+        closed_at = timestamp()
+        updated = dict(row)
+        updated.update(ended_at=closed_at, closed_by_id=interaction.user.id, end_photo_url=None)
+        if msg is not None:
+            attachments = list(msg.attachments)
+            start = next((a for a in attachments if a.filename.startswith('pontaj_start_')), None)
+            embeds = build_embeds(updated, start_filename=start.filename if start else None, end_filename=filename)
+            await msg.edit(embeds=embeds, attachments=attachments, files=files)
+        else:
+            # Recuperare pentru pontajele salvate fără panou/message_id.
+            embeds = build_embeds(updated, end_filename=filename)
+            msg = await ch.send(embeds=embeds, files=files)
+        end_url = None
+        if filename:
+            refreshed = await ch.fetch_message(msg.id)
+            attachment = next((a for a in refreshed.attachments if a.filename == filename), None)
+            if attachment:
+                end_url = attachment.url
         with get_db() as db:
-            result = db.execute('UPDATE business_attendance SET ended_at=?,closed_by_id=?,end_photo_url=? WHERE id=? AND ended_at IS NULL', (timestamp(), interaction.user.id, 'pending' if image_data else None, row['id']))
+            result = db.execute(
+                'UPDATE business_attendance SET ended_at=?,closed_by_id=?,end_photo_url=?,message_id=? WHERE id=? AND ended_at IS NULL',
+                (closed_at, interaction.user.id, end_url, msg.id, row['id']))
             if result.rowcount != 1:
                 return await interaction.followup.send('❌ Pontajul este deja închis.', ephemeral=True)
-            row = db.execute('SELECT * FROM business_attendance WHERE id=?', (row['id'],)).fetchone()
-        embeds = build_embeds(row, start_filename=start_attachment.filename if start_attachment else None, end_filename=filename)
-        files = [discord.File(io.BytesIO(image_data), filename=filename)] if image_data else []
-        try:
-            # attachments= păstrează fotografia de început, iar cea nouă este adăugată ca fișier.
-            await msg.edit(embeds=embeds, attachments=[start_attachment] if start_attachment else [], files=files)
-            if image_data:
-                updated = await ch.fetch_message(msg.id)
-                end_attachment = next((a for a in updated.attachments if a.filename == filename), None)
-                if end_attachment:
-                    with get_db() as db:
-                        db.execute('UPDATE business_attendance SET end_photo_url=? WHERE id=?', (end_attachment.url, row['id']))
-                else:
-                    log.warning('Fotografia finala nu apare in lista de attachments pentru mesajul %s', msg.id)
-        except Exception:
-            log.exception('Pontaj închis în DB, dar editarea panoului a eșuat')
-            return await interaction.followup.send('⚠️ Pontaj închis în baza de date, dar panoul nu s-a putut actualiza.', ephemeral=True)
-        await interaction.followup.send('✅ Pontaj încheiat. Ambele dovezi sunt în panou.', ephemeral=True)
+        await interaction.followup.send('✅ Pontaj încheiat. Panoul a fost actualizat.', ephemeral=True)
     except ValueError as exc:
         await interaction.followup.send('❌ ' + str(exc), ephemeral=True)
     except Exception:
