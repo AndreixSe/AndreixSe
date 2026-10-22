@@ -610,6 +610,32 @@ def migrate_database():
     cur.execute("CREATE INDEX IF NOT EXISTS idx_mining_entries_session ON mining_entries(session_id)")
 
     # -----------------------------------------------------
+    # PONTAJ AFACERE - sistem independent
+    # -----------------------------------------------------
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS business_attendance (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER NOT NULL,
+            user_name TEXT,
+            started_at TEXT NOT NULL,
+            ended_at TEXT,
+            closed_by_id INTEGER,
+            photo_url TEXT,
+            channel_id INTEGER NOT NULL,
+            message_id INTEGER,
+            proof_message_id INTEGER
+        )
+    """)
+    cur.execute("""
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_business_attendance_one_active
+        ON business_attendance(user_id) WHERE ended_at IS NULL
+    """)
+    cur.execute("""
+        CREATE INDEX IF NOT EXISTS idx_business_attendance_user
+        ON business_attendance(user_id, started_at)
+    """)
+
+    # -----------------------------------------------------
     # DEFAULT SETTINGS
     # -----------------------------------------------------
 
