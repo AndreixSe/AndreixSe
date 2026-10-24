@@ -11,6 +11,7 @@ from systems.patrol.module import PatrolView
 from systems.attendance.module import AttendanceView
 import systems.donations.module  # noqa: F401
 import systems.attendance_business.module  # noqa: F401
+import systems.seif.module  # noqa: F401
 
 TOKEN = os.getenv("DISCORD_TOKEN")
 GUILD_ID = 1527916365837766667
