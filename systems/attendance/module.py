@@ -1,833 +1,424 @@
+"""Pontaj Cayo individual. Inlocuieste doar systems/attendance/module.py."""
+import logging
 import asyncio
-import discord
-from datetime import datetime, date, time, timedelta
+from datetime import time
+from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
+import discord
+from discord import app_commands
 from core.bot import bot
-from core.database import get_db, now_string
+from core.database import get_db
+
+log = logging.getLogger(__name__)
+TZ = ZoneInfo('Europe/Bucharest')
+CAYO_CHANNEL = 1556701325335732264
+HISTORY_CHANNEL = 1563360025244733490
+DM_OWNER = 472854745862635549
+OPEN_TIME = time(19, 45)
+ADMINS = {1554072182735511623, 1528799552075989102, 1527919721629089862}
+MEMBERS = ADMINS | {1528804522938597557}
 
 
-# =========================================================
-# ATTENDANCE ROLE ACCESS
-# =========================================================
-
-ROLE_DISCORD_MOD = 1554072182735511623
-ROLE_LIDER = 1528799552075989102
-ROLE_CO_LIDER = 1527919721629089862
-ROLE_MIEMBRO = 1528804522938597557
-
-ATTENDANCE_ADMIN_ROLES = {
-    ROLE_DISCORD_MOD,
-    ROLE_LIDER,
-    ROLE_CO_LIDER,
-}
-
-ATTENDANCE_MEMBER_ROLES = ATTENDANCE_ADMIN_ROLES | {
-    ROLE_MIEMBRO,
-}
+def permitted(member, roles):
+    return any(role.id in roles for role in getattr(member, 'roles', ()))
 
 
-def has_any_role(member, allowed_role_ids):
-    return any(
-        role.id in allowed_role_ids
-        for role in getattr(member, "roles", [])
-    )
+def setup_cayo_db():
+    with get_db() as db:
+        db.execute('''CREATE TABLE IF NOT EXISTS cayo_attendance (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER NOT NULL,
+            user_name TEXT,
+            started_at TEXT NOT NULL,
+            ended_at TEXT,
+            closed_by_id INTEGER,
+            channel_id INTEGER,
+            message_id INTEGER
+        )''')
+        db.execute('CREATE INDEX IF NOT EXISTS idx_cayo_user_start ON cayo_attendance(user_id, started_at)')
+        db.execute('CREATE UNIQUE INDEX IF NOT EXISTS idx_cayo_one_active ON cayo_attendance(user_id) WHERE ended_at IS NULL')
+        db.execute('''CREATE TABLE IF NOT EXISTS cayo_dm_panels (
+            work_date TEXT PRIMARY KEY,
+            message_id INTEGER,
+            status TEXT NOT NULL DEFAULT 'open'
+        )''')
 
 
-def is_attendance_admin(member):
-    return has_any_role(member, ATTENDANCE_ADMIN_ROLES)
+def now():
+    return datetime.now(TZ)
 
 
-def can_use_attendance(member):
-    return has_any_role(member, ATTENDANCE_MEMBER_ROLES)
+def parse(value):
+    dt = datetime.fromisoformat(value)
+    return dt.replace(tzinfo=TZ) if dt.tzinfo is None else dt.astimezone(TZ)
 
 
-# =========================================================
-# HELPERS
-# =========================================================
-
-def romania_now():
-    return datetime.now(ZoneInfo("Europe/Bucharest"))
+def duration(start, end):
+    secs = max(0, int((end - start).total_seconds()))
+    return f'{secs // 3600}h {(secs % 3600) // 60}m'
 
 
-def today_string():
-    return romania_now().strftime("%d.%m.%Y")
+def active(user_id):
+    with get_db() as db:
+        return db.execute('SELECT * FROM cayo_attendance WHERE user_id=? AND ended_at IS NULL ORDER BY id DESC LIMIT 1', (user_id,)).fetchone()
 
 
-def time_only(value):
-    if not value:
-        return "-"
-    value = str(value)
-    try:
-        return datetime.strptime(value, "%d.%m.%Y %H:%M:%S").strftime("%H:%M:%S")
-    except ValueError:
-        try:
-            return datetime.fromisoformat(value).strftime("%H:%M:%S")
-        except ValueError:
-            return value
-
-
-def duration_text(started_at, ended_at=None):
-    if not started_at:
-        return "-"
-
-    def parse(value):
-        if not value:
-            return romania_now().replace(tzinfo=None)
-        value = str(value)
-        try:
-            return datetime.strptime(value, "%d.%m.%Y %H:%M:%S")
-        except ValueError:
-            try:
-                return datetime.fromisoformat(value)
-            except ValueError:
-                return None
-
-    start = parse(started_at)
-    end = parse(ended_at)
-
-    if not start or not end:
-        return "-"
-
-    seconds = max(0, int((end - start).total_seconds()))
-    hours, rem = divmod(seconds, 3600)
-    minutes, _ = divmod(rem, 60)
-
-    if hours:
-        return f"{hours}h {minutes}m"
-    return f"{minutes}m"
-
-
-def get_day(day_id):
-    conn = get_db()
-    cur = conn.cursor()
-    cur.execute("SELECT * FROM attendance_days WHERE id = ?", (day_id,))
-    row = cur.fetchone()
-    conn.close()
-    return row
-
-
-def get_latest_today_day():
-    conn = get_db()
-    cur = conn.cursor()
-    cur.execute("""
-        SELECT *
-        FROM attendance_days
-        WHERE attendance_date = ?
-        ORDER BY id DESC
-        LIMIT 1
-    """, (today_string(),))
-    row = cur.fetchone()
-    conn.close()
-    return row
-
-
-def get_latest_open_day():
-    conn = get_db()
-    cur = conn.cursor()
-    cur.execute("""
-        SELECT *
-        FROM attendance_days
-        WHERE status = 'open'
-        ORDER BY id DESC
-        LIMIT 1
-    """)
-    row = cur.fetchone()
-    conn.close()
-    return row
-
-
-def get_entries(day_id):
-    conn = get_db()
-    cur = conn.cursor()
-    cur.execute("""
-        SELECT *
-        FROM attendance_daily_entries
-        WHERE day_id = ?
-        ORDER BY started_at ASC, id ASC
-    """, (day_id,))
-    rows = cur.fetchall()
-    conn.close()
-    return rows
-
-
-def create_daily_embed(day_id):
-    day = get_day(day_id)
-
-    if not day:
-        return discord.Embed(
-            title="🕐 PONTAJ ZILNIC",
-            description="❌ Pontajul nu mai există.",
-            color=discord.Color.red()
-        )
-
-    entries = get_entries(day_id)
-    active = [row for row in entries if not row["ended_at"]]
-    finished = [row for row in entries if row["ended_at"]]
-
-    is_open = day["status"] == "open"
-
-    embed = discord.Embed(
-        title="🕐 PONTAJ ZILNIC",
-        description=(
-            f"📅 **Data:** {day['attendance_date']}\n"
-            f"{'🟢 **Status:** DESCHIS' if is_open else '🔒 **Status:** ÎNCHEIAT'}"
-        ),
-        color=discord.Color.green() if is_open else discord.Color.red()
-    )
-
-    embed.add_field(
-        name="📊 Situație",
-        value=(
-            f"👥 Participanți: **{len(entries)}**\n"
-            f"🟢 Încă pontați: **{len(active)}**\n"
-            f"✅ Au încheiat: **{len(finished)}**"
-        ),
-        inline=False
-    )
-
-    if entries:
-        lines = []
-        for row in entries:
-            if row["ended_at"]:
-                lines.append(
-                    f"👤 <@{row['user_id']}> • "
-                    f"`{time_only(row['started_at'])}` → "
-                    f"`{time_only(row['ended_at'])}`"
-                )
-            else:
-                lines.append(
-                    f"👤 <@{row['user_id']}> • "
-                    f"🟢 de la `{time_only(row['started_at'])}`"
-                )
-
-        text = "\n".join(lines)
-        if len(text) > 3800:
-            text = text[:3750] + "\n…"
-
-        embed.add_field(
-            name="👥 Pontajul zilei",
-            value=text,
-            inline=False
-        )
-    else:
-        embed.add_field(
-            name="👥 Pontajul zilei",
-            value="Nu s-a pontat nimeni încă.",
-            inline=False
-        )
-
-    if not is_open:
-        embed.add_field(
-            name="🔴 Închis la",
-            value=f"`{time_only(day['closed_at'])}`",
-            inline=False
-        )
-
-    embed.set_footer(
-        text="Pontaj zilnic • fiecare panou rămâne ca evidență"
-    )
-
+def panel(row):
+    start = parse(row['started_at'])
+    finished = bool(row['ended_at'])
+    embed = discord.Embed(title='🔒 PONTAJ CAYO — ÎNCHEIAT' if finished else '🟢 PONTAJ CAYO — ÎNCEPUT', color=discord.Color.red() if finished else discord.Color.green())
+    embed.add_field(name='👤 Membru', value=f"<@{row['user_id']}>", inline=False)
+    embed.add_field(name='📅 Data', value=start.strftime('%d.%m.%Y'), inline=False)
+    embed.add_field(name='🟢 Început', value=start.strftime('%H:%M:%S'), inline=True)
+    if finished:
+        end = parse(row['ended_at'])
+        embed.add_field(name='🔴 Încheiere', value=end.strftime('%d.%m.%Y %H:%M:%S'), inline=True)
+        embed.add_field(name='⏱️ Durată totală', value=duration(start, end), inline=False)
+        embed.add_field(name='👑 Închis de', value=f"<@{row['closed_by_id']}>", inline=False)
+    embed.add_field(name='📊 Status', value='🔒 ÎNCHEIAT' if finished else '🟢 ACTIV', inline=False)
+    embed.set_footer(text='Dominicans • Pontaj Cayo')
     return embed
 
 
-def create_history_embed(day_id):
-    day = get_day(day_id)
-    entries = get_entries(day_id)
-
-    embed = discord.Embed(
-        title="📋 ISTORIC PONTAJ — ZILNIC",
-        description=(
-            f"📅 **Data:** {day['attendance_date']}\n"
-            "Sunt afișate doar înregistrările acestui pontaj."
-        ),
-        color=discord.Color.blue()
-    )
-
-    if not entries:
-        embed.add_field(
-            name="ℹ️ Istoric",
-            value="Nu există înregistrări pentru această zi.",
-            inline=False
-        )
-        return embed
-
-    for row in entries[:25]:
-        if row["ended_at"]:
-            status = (
-                f"🟢 Intrare: `{time_only(row['started_at'])}`\n"
-                f"🔴 Ieșire: `{time_only(row['ended_at'])}`\n"
-                f"⏱️ Durată: **{duration_text(row['started_at'], row['ended_at'])}**"
-            )
-        else:
-            status = (
-                f"🟢 Intrare: `{time_only(row['started_at'])}`\n"
-                f"🟡 Ieșire: **Încă pontat**\n"
-                f"⏱️ Durată curentă: **{duration_text(row['started_at'])}**"
-            )
-
-        display_name = row["user_name"] or f"<@{row['user_id']}>"
-        embed.add_field(
-            name=f"👤 {display_name}",
-            value=status,
-            inline=False
-        )
-
-    if len(entries) > 25:
-        embed.set_footer(
-            text=f"Sunt afișate primele 25 din {len(entries)} înregistrări."
-        )
-
-    return embed
+async def cayo_channel():
+    return bot.get_channel(CAYO_CHANNEL) or await bot.fetch_channel(CAYO_CHANNEL)
 
 
-# =========================================================
-# VIEW
-# =========================================================
-
+# main.py inca apeleaza bot.add_view(AttendanceView()); pastram compatibilitatea
+# cu panourile VECHI, fara a mai permite pontari prin butoanele lor.
 class AttendanceView(discord.ui.View):
     def __init__(self, day_id=None):
         super().__init__(timeout=None)
-        self.day_id = day_id
 
-    async def resolve_day(self, interaction):
-        if self.day_id:
-            return get_day(self.day_id)
+    @discord.ui.button(label='Pontaj vechi închis', style=discord.ButtonStyle.secondary, custom_id='attendance_start')
+    async def old_start(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.send_message('ℹ️ Folosește /incepepontajcayo pentru noul Pontaj Cayo.', ephemeral=True)
 
-        # Compatibilitate cu view-ul persistent înregistrat la pornirea botului.
-        conn = get_db()
-        cur = conn.cursor()
-        cur.execute("""
-            SELECT *
-            FROM attendance_days
-            WHERE message_id = ?
-            ORDER BY id DESC
-            LIMIT 1
-        """, (interaction.message.id,))
-        day = cur.fetchone()
-        conn.close()
-        return day
+    @discord.ui.button(label='Pontaj vechi închis', style=discord.ButtonStyle.secondary, custom_id='attendance_stop')
+    async def old_stop(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.send_message('ℹ️ Folosește /incheiepontajcayo pentru noul Pontaj Cayo.', ephemeral=True)
 
-    @discord.ui.button(
-        label="Începe pontaj",
-        style=discord.ButtonStyle.success,
-        emoji="🟢",
-        custom_id="attendance_start"
-    )
-    async def start_attendance(self, interaction, button):
-        await interaction.response.defer(ephemeral=True)
 
-        if not can_use_attendance(interaction.user):
-            await interaction.followup.send(
-                "❌ Nu ai rolul necesar pentru a folosi pontajul.",
-                ephemeral=True
-            )
-            return
-
-        day = await self.resolve_day(interaction)
-
-        if not day:
-            await interaction.followup.send(
-                "❌ Acest panou nu mai este asociat unui pontaj.",
-                ephemeral=True
-            )
-            return
-
-        if day["status"] != "open":
-            await interaction.followup.send(
-                "🔒 Pontajul acestei zile este încheiat. Nu te mai poți ponta aici.",
-                ephemeral=True
-            )
-            return
-
-        conn = get_db()
-        cur = conn.cursor()
-
+@bot.tree.command(name='incepepontajcayo', description='Începe un pontaj individual Cayo, fără fotografie.')
+async def incepepontajcayo(interaction: discord.Interaction):
+    await interaction.response.defer(ephemeral=True)
+    if not permitted(interaction.user, MEMBERS):
+        return await interaction.followup.send('❌ Nu ai rolul necesar.', ephemeral=True)
+    try:
+        setup_cayo_db()
+        if active(interaction.user.id):
+            return await interaction.followup.send('❌ Ai deja un pontaj Cayo activ.', ephemeral=True)
+        ch = await cayo_channel()
+        stamp = now().isoformat(timespec='seconds')
+        with get_db() as db:
+            # Blocheaza inserarile concurente in cadrul bazei de date.
+            db.execute('BEGIN IMMEDIATE')
+            if db.execute('SELECT 1 FROM cayo_attendance WHERE user_id=? AND ended_at IS NULL', (interaction.user.id,)).fetchone():
+                return await interaction.followup.send('❌ Ai deja un pontaj Cayo activ.', ephemeral=True)
+            cur = db.execute('INSERT INTO cayo_attendance(user_id,user_name,started_at,channel_id) VALUES (?,?,?,?)', (interaction.user.id, interaction.user.display_name, stamp, CAYO_CHANNEL))
+            entry_id = cur.lastrowid
+            row = db.execute('SELECT * FROM cayo_attendance WHERE id=?', (entry_id,)).fetchone()
         try:
-            cur.execute("""
-                SELECT *
-                FROM attendance_daily_entries
-                WHERE day_id = ? AND user_id = ?
-                LIMIT 1
-            """, (day["id"], interaction.user.id))
-
-            if cur.fetchone():
-                await interaction.followup.send(
-                    "❌ Ai fost deja pontat în acest pontaj zilnic.",
-                    ephemeral=True
-                )
-                return
-
-            cur.execute("""
-                INSERT INTO attendance_daily_entries(
-                    day_id, user_id, user_name, started_at, ended_at
-                )
-                VALUES (?, ?, ?, ?, NULL)
-            """, (
-                day["id"],
-                interaction.user.id,
-                interaction.user.display_name,
-                now_string()
-            ))
-            conn.commit()
-
-        except Exception as error:
-            conn.rollback()
-            print(f"❌ Eroare pornire pontaj zilnic: {error}")
-            await interaction.followup.send(
-                "❌ A apărut o eroare la pornirea pontajului.",
-                ephemeral=True
-            )
-            return
-        finally:
-            conn.close()
-
-        await update_daily_panel(day["id"])
-        await interaction.followup.send(
-            "✅ Ai început pontajul.",
-            ephemeral=True
-        )
-
-    @discord.ui.button(
-        label="Încheie pontaj",
-        style=discord.ButtonStyle.danger,
-        emoji="🔴",
-        custom_id="attendance_stop"
-    )
-    async def stop_attendance(self, interaction, button):
-        await interaction.response.defer(ephemeral=True)
-
-        if not can_use_attendance(interaction.user):
-            await interaction.followup.send(
-                "❌ Nu ai rolul necesar pentru a folosi pontajul.",
-                ephemeral=True
-            )
-            return
-
-        day = await self.resolve_day(interaction)
-
-        if not day:
-            await interaction.followup.send(
-                "❌ Acest panou nu mai este asociat unui pontaj.",
-                ephemeral=True
-            )
-            return
-
-        if day["status"] != "open":
-            await interaction.followup.send(
-                "🔒 Pontajul acestei zile este deja încheiat.",
-                ephemeral=True
-            )
-            return
-
-        conn = get_db()
-        cur = conn.cursor()
-
-        try:
-            cur.execute("""
-                SELECT *
-                FROM attendance_daily_entries
-                WHERE day_id = ? AND user_id = ?
-                LIMIT 1
-            """, (day["id"], interaction.user.id))
-            entry = cur.fetchone()
-
-            if not entry:
-                await interaction.followup.send(
-                    "❌ Nu ești pontat în acest pontaj.",
-                    ephemeral=True
-                )
-                return
-
-            if entry["ended_at"]:
-                await interaction.followup.send(
-                    "❌ Ai încheiat deja pontajul.",
-                    ephemeral=True
-                )
-                return
-
-            cur.execute("""
-                UPDATE attendance_daily_entries
-                SET ended_at = ?
-                WHERE id = ?
-            """, (now_string(), entry["id"]))
-            conn.commit()
-
-        except Exception as error:
-            conn.rollback()
-            print(f"❌ Eroare încheiere pontaj membru: {error}")
-            await interaction.followup.send(
-                "❌ A apărut o eroare la încheierea pontajului.",
-                ephemeral=True
-            )
-            return
-        finally:
-            conn.close()
-
-        await update_daily_panel(day["id"])
-        await interaction.followup.send(
-            "✅ Ai încheiat pontajul.",
-            ephemeral=True
-        )
+            msg = await ch.send(embed=panel(row))
+        except Exception:
+            with get_db() as db:
+                db.execute('DELETE FROM cayo_attendance WHERE id=? AND message_id IS NULL', (entry_id,))
+            raise
+        with get_db() as db:
+            db.execute('UPDATE cayo_attendance SET message_id=? WHERE id=?', (msg.id, entry_id))
+        await update_live_dm()
+        await interaction.followup.send('✅ Pontaj Cayo început. Panoul individual a fost publicat.', ephemeral=True)
+    except Exception:
+        log.exception('Eroare incepepontajcayo')
+        await interaction.followup.send('❌ Eroare la pornire. Verifică Railway.', ephemeral=True)
 
 
-async def update_daily_panel(day_id):
-    day = get_day(day_id)
-    if not day or not day["channel_id"] or not day["message_id"]:
-        return
-
+async def close_cayo(interaction, user_id):
     try:
-        channel = bot.get_channel(int(day["channel_id"]))
-        if channel is None:
-            channel = await bot.fetch_channel(int(day["channel_id"]))
-
-        message = await channel.fetch_message(int(day["message_id"]))
-        await message.edit(
-            embed=create_daily_embed(day_id),
-            view=AttendanceView(day_id)
-        )
-    except discord.NotFound as error:
-        # Mesajul a fost sters din Discord; pastram evidenta in baza de date.
-        if error.code == 10008:
-            print(f"ℹ️ Panoul vechi #{day_id} nu mai exista pe Discord; datele raman salvate.")
-        else:
-            print(f"❌ Eroare Discord la panoul zilnic {day_id}: {error}")
-    except Exception as error:
-        print(f"❌ Eroare actualizare panou zilnic {day_id}: {error}")
-
-
-# =========================================================
-# COMMANDS
-# =========================================================
-
-@bot.tree.command(
-    name="setup_pontaj",
-    description="Creează un pontaj nou pentru ziua curentă."
-)
-async def setup_pontaj(interaction: discord.Interaction):
-    await interaction.response.defer(ephemeral=True)
-
-    if not is_attendance_admin(interaction.user):
-        await interaction.followup.send(
-            "❌ Doar Lider, Co-Lider sau Discord Mod poate crea pontajul.",
-            ephemeral=True
-        )
-        return
-
-    conn = get_db()
-    cur = conn.cursor()
-
-    try:
-        # Cerință: setup-ul poate fi rulat zilnic și nu este blocat de
-        # pontajele/panourile anterioare. Fiecare rulare creează o sesiune nouă.
-        cur.execute("""
-            INSERT INTO attendance_days(
-                attendance_date,
-                status,
-                created_at,
-                channel_id
-            )
-            VALUES (?, 'open', ?, ?)
-        """, (
-            today_string(),
-            now_string(),
-            interaction.channel.id
-        ))
-        day_id = cur.lastrowid
-        conn.commit()
-
-        message = await interaction.channel.send(
-            embed=create_daily_embed(day_id),
-            view=AttendanceView(day_id)
-        )
-
-        cur.execute("""
-            UPDATE attendance_days
-            SET message_id = ?
-            WHERE id = ?
-        """, (message.id, day_id))
-        conn.commit()
-
-    except Exception as error:
-        conn.rollback()
-        print(f"❌ Eroare setup pontaj zilnic: {error}")
-        await interaction.followup.send(
-            "❌ Panoul de pontaj nu a putut fi creat.",
-            ephemeral=True
-        )
-        return
-    finally:
-        conn.close()
-
-    await interaction.followup.send(
-        f"✅ Pontajul pentru **{today_string()}** a fost creat.",
-        ephemeral=True
-    )
-
-
-@bot.tree.command(
-    name="incheie_pontaj",
-    description="Închide pontajul zilnic curent fără să șteargă evidența."
-)
-async def incheie_pontaj(interaction: discord.Interaction):
-    await interaction.response.defer(ephemeral=True)
-
-    if not is_attendance_admin(interaction.user):
-        await interaction.followup.send(
-            "❌ Doar Lider, Co-Lider sau Discord Mod poate închide pontajul.",
-            ephemeral=True
-        )
-        return
-
-    day = get_latest_open_day()
-
-    if not day:
-        await interaction.followup.send(
-            "❌ Nu există niciun pontaj deschis.",
-            ephemeral=True
-        )
-        return
-
-    conn = get_db()
-    cur = conn.cursor()
-
-    try:
-        closed_at = now_string()
-
-        # Persoanele care încă sunt pontate sunt închise automat la ora
-        # închiderii generale, astfel istoricul rămâne complet.
-        cur.execute("""
-            UPDATE attendance_daily_entries
-            SET ended_at = ?
-            WHERE day_id = ? AND ended_at IS NULL
-        """, (closed_at, day["id"]))
-
-        cur.execute("""
-            UPDATE attendance_days
-            SET status = 'closed', closed_at = ?
-            WHERE id = ?
-        """, (closed_at, day["id"]))
-
-        conn.commit()
-    except Exception as error:
-        conn.rollback()
-        print(f"❌ Eroare închidere pontaj zilnic: {error}")
-        await interaction.followup.send(
-            "❌ Pontajul nu a putut fi închis.",
-            ephemeral=True
-        )
-        return
-    finally:
-        conn.close()
-
-    await update_daily_panel(day["id"])
-
-    await interaction.followup.send(
-        f"🔒 Pontajul din **{day['attendance_date']}** a fost închis. "
-        "Panoul și evidența au rămas salvate.",
-        ephemeral=True
-    )
-
-
-@bot.tree.command(
-    name="pontaj",
-    description="Afișează ultimul pontaj creat astăzi."
-)
-async def pontaj(interaction: discord.Interaction):
-    if not is_attendance_admin(interaction.user):
-        await interaction.response.send_message(
-            "❌ Doar Lider, Co-Lider sau Discord Mod poate folosi această comandă.",
-            ephemeral=True
-        )
-        return
-
-    day = get_latest_today_day()
-
-    if not day:
-        await interaction.response.send_message(
-            "❌ Nu există încă un pontaj creat pentru astăzi.",
-            ephemeral=True
-        )
-        return
-
-    await interaction.response.send_message(
-        embed=create_daily_embed(day["id"]),
-        ephemeral=True
-    )
-
-
-@bot.tree.command(
-    name="istoric_pontaj",
-    description="Afișează istoricul detaliat al pontajului de astăzi."
-)
-async def istoric_pontaj(interaction: discord.Interaction):
-    await interaction.response.defer(ephemeral=True)
-
-    if not is_attendance_admin(interaction.user):
-        await interaction.followup.send(
-            "❌ Doar Lider, Co-Lider sau Discord Mod poate vedea istoricul.",
-            ephemeral=True
-        )
-        return
-
-    day = get_latest_today_day()
-
-    if not day:
-        await interaction.followup.send(
-            "❌ Nu există pontaj pentru ziua de astăzi.",
-            ephemeral=True
-        )
-        return
-
-    await interaction.followup.send(
-        embed=create_history_embed(day["id"]),
-        ephemeral=True
-    )
-
-
-# =========================================================
-# PROGRAM AUTOMAT PONTAJ - ORA ROMANIEI
-# Pornire: 12.10.2026, zilnic 19:45; inchidere: 00:00.
-# =========================================================
-
-AUTO_ATTENDANCE_CHANNEL_ID = 1556701325335732264
-AUTO_ATTENDANCE_START_DATE = date(2026, 10, 12)
-AUTO_ATTENDANCE_OPEN_TIME = time(19, 45)
-_auto_attendance_task = None
-
-
-async def _auto_close_previous_days():
-    # Folosim miezul noptii (ora Romaniei) ca ora oficiala de inchidere.
-    # Daca botul a fost oprit, recuperam inchiderea fara sa stergem istoricul.
-    current_date = romania_now().date()
-    conn = get_db()
-    previous = []
-    try:
-        cur = conn.cursor()
-        cur.execute("SELECT id, attendance_date FROM attendance_days WHERE status = 'open'")
-        for row in cur.fetchall():
+        setup_cayo_db()
+        row = active(user_id)
+        if not row:
+            return await interaction.followup.send('❌ Nu există pontaj Cayo activ pentru acest membru.', ephemeral=True)
+        end = now().isoformat(timespec='seconds')
+        with get_db() as db:
+            result = db.execute('UPDATE cayo_attendance SET ended_at=?,closed_by_id=? WHERE id=? AND ended_at IS NULL', (end, interaction.user.id, row['id']))
+            if result.rowcount != 1:
+                return await interaction.followup.send('❌ Pontajul a fost deja încheiat.', ephemeral=True)
+            updated = db.execute('SELECT * FROM cayo_attendance WHERE id=?', (row['id'],)).fetchone()
+        ch = await cayo_channel()
+        msg = None
+        if row['message_id']:
             try:
-                day_date = datetime.strptime(row['attendance_date'], '%d.%m.%Y').date()
-            except (TypeError, ValueError):
-                print(f"⚠️ Pontaj automat: data invalida pentru pontaj #{row['id']}.")
-                continue
-            if day_date < current_date:
-                previous.append((row['id'], day_date))
-
-        for day_id, day_date in previous:
-            # Pontajul se inchide la inceputul zilei urmatoare, nu la ora
-            # la care Railway reuseste sa execute verificarea.
-            midnight = datetime.combine(day_date + timedelta(days=1), time.min)
-            closed_at = midnight.strftime('%d.%m.%Y %H:%M:%S')
-            cur.execute(
-                "UPDATE attendance_daily_entries SET ended_at = ? WHERE day_id = ? AND ended_at IS NULL",
-                (closed_at, day_id)
-            )
-            cur.execute(
-                "UPDATE attendance_days SET status = 'closed', closed_at = ? WHERE id = ? AND status = 'open'",
-                (closed_at, day_id)
-            )
-        conn.commit()
+                msg = await ch.fetch_message(int(row['message_id']))
+            except discord.NotFound:
+                pass
+        if msg:
+            try:
+                await msg.edit(embed=panel(updated))
+            except discord.NotFound:
+                msg = None
+        if msg is None:
+            msg = await ch.send(embed=panel(updated))
+            with get_db() as db:
+                db.execute('UPDATE cayo_attendance SET message_id=? WHERE id=?', (msg.id, row['id']))
+        await update_live_dm()
+        await interaction.followup.send('✅ Pontaj Cayo încheiat. Durata a fost salvată.', ephemeral=True)
     except Exception:
-        conn.rollback()
-        raise
-    finally:
-        conn.close()
-
-    for day_id, _ in previous:
-        await update_daily_panel(day_id)
-    if previous:
-        print(f"✅ Pontaj automat: {len(previous)} pontaj(e) inchise la 00:00 (ora Romaniei).")
+        log.exception('Eroare inchidere Cayo')
+        await interaction.followup.send('⚠️ A apărut o eroare. Verifică Railway; pontajul poate fi deja salvat.', ephemeral=True)
 
 
-async def _auto_open_today():
-    current = romania_now()
-    if current.date() < AUTO_ATTENDANCE_START_DATE or current.time() < AUTO_ATTENDANCE_OPEN_TIME:
-        return
+@bot.tree.command(name='incheiepontajcayo', description='Încheie propriul pontaj Cayo.')
+async def incheiepontajcayo(interaction: discord.Interaction):
+    await interaction.response.defer(ephemeral=True)
+    if not permitted(interaction.user, MEMBERS):
+        return await interaction.followup.send('❌ Nu ai rolul necesar.', ephemeral=True)
+    await close_cayo(interaction, interaction.user.id)
 
-    conn = get_db()
-    try:
-        cur = conn.cursor()
-        cur.execute('BEGIN IMMEDIATE')
-        # Preferam panoul deja creat in canalul automat; daca exista unul
-        # manual astazi, il respectam pentru a nu crea duplicate.
-        cur.execute('''
-            SELECT * FROM attendance_days
-            WHERE attendance_date = ?
-            ORDER BY CASE WHEN channel_id = ? THEN 0 ELSE 1 END, id DESC
-            LIMIT 1
-        ''', (today_string(), AUTO_ATTENDANCE_CHANNEL_ID))
-        day = cur.fetchone()
-        if day is None:
-            cur.execute('''
-                INSERT INTO attendance_days(attendance_date, status, created_at, channel_id)
-                VALUES (?, 'open', ?, ?)
-            ''', (today_string(), now_string(), AUTO_ATTENDANCE_CHANNEL_ID))
-            day_id = cur.lastrowid
-            channel_id = AUTO_ATTENDANCE_CHANNEL_ID
-            message_id = None
-        else:
-            day_id = day['id']
-            channel_id = day['channel_id'] or AUTO_ATTENDANCE_CHANNEL_ID
-            message_id = day['message_id']
-            if day['status'] != 'open':
-                conn.commit()
-                return
-        conn.commit()
-    except Exception:
-        conn.rollback()
-        raise
-    finally:
-        conn.close()
 
-    channel = bot.get_channel(int(channel_id))
-    if channel is None:
-        channel = await bot.fetch_channel(int(channel_id))
+@bot.tree.command(name='ipc', description='Conducerea încheie pontajul Cayo al unui membru.')
+@app_commands.describe(membru='Membrul al cărui pontaj va fi încheiat')
+async def ipc(interaction: discord.Interaction, membru: discord.Member):
+    await interaction.response.defer(ephemeral=True)
+    if not permitted(interaction.user, ADMINS):
+        return await interaction.followup.send('❌ Doar Lider, Co-Lider și Discord Mod pot folosi /ipc.', ephemeral=True)
+    await close_cayo(interaction, membru.id)
 
-    if message_id:
+
+def week_history(member_id, selected):
+    monday = selected - timedelta(days=selected.weekday())
+    sunday = monday + timedelta(days=6)
+    start_dt = datetime.combine(monday, datetime.min.time(), tzinfo=TZ)
+    end_dt = start_dt + timedelta(days=7)
+    with get_db() as db:
+        rows = db.execute('SELECT * FROM cayo_attendance WHERE user_id=? ORDER BY started_at, id', (member_id,)).fetchall()
+        # Inregistrarile istorice ale vechiului pontaj raman consultabile.
         try:
-            await channel.fetch_message(int(message_id))
-            return  # Panoul exista deja: nu postam duplicat.
-        except discord.NotFound:
-            print(f"⚠️ Pontaj automat: mesajul #{message_id} pentru ziua curenta lipseste; refac panoul.")
-        # Erorile Forbidden / HTTPException se raporteaza si se reincearca;
-        # nu presupunem ca panoul a disparut.
+            legacy = db.execute('''SELECT e.user_id, e.started_at, e.ended_at
+                FROM attendance_daily_entries e JOIN attendance_days d ON e.day_id=d.id
+                WHERE e.user_id=? ORDER BY e.started_at''', (member_id,)).fetchall()
+        except Exception:
+            legacy = []
+    entries = []
+    for row in rows:
+        try:
+            started = parse(row['started_at'])
+            if start_dt <= started < end_dt:
+                entries.append((started, parse(row['ended_at']) if row['ended_at'] else None, False))
+        except (ValueError, TypeError):
+            log.warning('Data Cayo invalida la id=%s', row['id'])
+    for row in legacy:
+        try:
+            started = datetime.strptime(row['started_at'], '%d.%m.%Y %H:%M:%S').replace(tzinfo=TZ)
+            ended = datetime.strptime(row['ended_at'], '%d.%m.%Y %H:%M:%S').replace(tzinfo=TZ) if row['ended_at'] else None
+            if start_dt <= started < end_dt:
+                entries.append((started, ended, True))
+        except (ValueError, TypeError):
+            continue
+    entries.sort(key=lambda item: item[0])
+    return monday, sunday, entries
 
-    # Daca un send reuseste dar Railway se opreste inainte de salvarea ID-ului,
-    # Discord poate avea un mesaj orfan. Acesta este un caz rar care necesita
-    # verificare manuala; nu stergem niciodata inregistrarile din baza de date.
-    message = await channel.send(embed=create_daily_embed(day_id), view=AttendanceView(day_id))
-    conn = get_db()
+
+@bot.tree.command(name='istoric', description='Istoricul Cayo al unui membru pentru săptămâna unei date.')
+@app_commands.describe(membru='Alege membrul', data='Data din săptămâna dorită: ZZ/LL/AAAA (opțional)')
+async def istoric(interaction: discord.Interaction, membru: discord.Member, data: str | None = None):
+    await interaction.response.defer(ephemeral=True)
+    if not permitted(interaction.user, ADMINS):
+        return await interaction.followup.send('❌ Istoricul este doar pentru conducere.', ephemeral=True)
+    if interaction.channel_id != HISTORY_CHANNEL:
+        return await interaction.followup.send(f'❌ Folosește /istoric doar în <#{HISTORY_CHANNEL}>.', ephemeral=True)
     try:
-        conn.execute('UPDATE attendance_days SET message_id = ?, channel_id = ? WHERE id = ?',
-                     (message.id, int(channel_id), day_id))
-        conn.commit()
-    finally:
-        conn.close()
-    print(f"✅ Pontaj automat: panoul #{day_id} publicat/recuperat in canalul {channel_id} (mesaj {message.id}).")
+        selected = datetime.strptime(data, '%d/%m/%Y').date() if data else now().date()
+    except ValueError:
+        return await interaction.followup.send('❌ Data trebuie să fie ZZ/LL/AAAA, de exemplu 23/10/2026.', ephemeral=True)
+    try:
+        setup_cayo_db()
+        monday, sunday, entries = week_history(membru.id, selected)
+        days = ['Luni', 'Marți', 'Miercuri', 'Joi', 'Vineri', 'Sâmbătă', 'Duminică']
+        lines = []
+        total = 0
+        active_count = 0
+        for day_index in range(7):
+            day = monday + timedelta(days=day_index)
+            sessions = [x for x in entries if x[0].date() == day]
+            lines.append(f'**{days[day_index]} — {day:%d.%m.%Y}**')
+            if not sessions:
+                lines.append('— Fără pontaj')
+            for started, ended, legacy in sessions:
+                label = ' *(vechi)*' if legacy else ''
+                if ended:
+                    seconds = max(0, int((ended - started).total_seconds()))
+                    total += seconds
+                    lines.append(f'🟢 {started:%H:%M} → 🔴 {ended:%H:%M} • **{duration(started, ended)}**{label}')
+                else:
+                    active_count += 1
+                    lines.append(f'🟢 {started:%H:%M} → **PONTAJ ACTIV**{label}')
+            lines.append('')
+        footer = f'⏱️ Total încheiat: **{total // 3600}h {(total % 3600) // 60}m**\n🟢 Pontaje active: **{active_count}**'
+        title = '📋 PONTAJ CAYO — ISTORIC SĂPTĂMÂNAL'
+        heading = f'👤 Membru: {membru.mention}\n📅 Săptămâna: **{monday:%d.%m.%Y} – {sunday:%d.%m.%Y}**\n\n'
+        # Discord limiteaza descrierea embed la 4096 caractere.
+        chunks, current = [], heading
+        for line in lines:
+            if len(current) + len(line) + 1 > 3500:
+                chunks.append(current)
+                current = ''
+            current += line + '\n'
+        if current:
+            chunks.append(current)
+        if len(chunks[-1]) + len(footer) < 4000:
+            chunks[-1] += '\n' + footer
+        else:
+            chunks.append(footer)
+        embeds = [discord.Embed(title=title if i == 0 else '📋 ISTORIC CAYO — CONTINUARE', description=part, color=discord.Color.blue()) for i, part in enumerate(chunks)]
+        for i in range(0, len(embeds), 10):
+            await interaction.followup.send(embeds=embeds[i:i + 10], ephemeral=True)
+    except Exception:
+        log.exception('Eroare istoric Cayo')
+        await interaction.followup.send('❌ Eroare la istoric. Verifică Railway.', ephemeral=True)
 
 
-async def _auto_attendance_loop():
+# =========================================================
+# PANOU LIVE DM — 19:45 -> 00:00, ORA ROMANIEI
+# =========================================================
+_dm_task = None
+
+
+def work_date_for(moment):
+    # Intre 00:00 si 19:44 panoul precedent nu mai este activ.
+    return moment.date()
+
+
+def live_embed(day, closed=False):
+    with get_db() as db:
+        rows = db.execute(
+            'SELECT * FROM cayo_attendance WHERE ended_at IS NULL ORDER BY started_at, id'
+        ).fetchall() if not closed else []
+    e = discord.Embed(
+        title='🔒 PONTAJ CAYO — ÎNCHIS' if closed else '🏝️ PONTAJ CAYO — LIVE',
+        color=discord.Color.red() if closed else discord.Color.green()
+    )
+    e.add_field(name='📅 Data', value=day.strftime('%d.%m.%Y'), inline=False)
+    e.add_field(name='🕒 Program', value='19:45 – 00:00 (ora României)', inline=False)
+    e.add_field(name='📡 Canal conectat', value=f'<#{CAYO_CHANNEL}>', inline=False)
+    if closed:
+        body = 'Niciun membru activ. Pontajele rămase au fost închise automat la 00:00.'
+    elif not rows:
+        body = 'Momentan nu este nimeni pontat.'
+    else:
+        body = '\n'.join(f"🟢 <@{r['user_id']}> — {parse(r['started_at']):%H:%M}" for r in rows[:45])
+        if len(rows) > 45:
+            body += f'\n… și încă {len(rows) - 45} membri'
+    e.add_field(name='👥 MEMBRI ACTIVI', value=body[:1024], inline=False)
+    e.add_field(name='🟢 Activi', value=str(len(rows)), inline=False)
+    e.set_footer(text='Dominicans • Monitorizare încheiată' if closed else 'Dominicans • Actualizare la fiecare pontare')
+    return e
+
+
+async def owner_dm():
+    owner = bot.get_user(DM_OWNER) or await bot.fetch_user(DM_OWNER)
+    return owner.dm_channel or await owner.create_dm()
+
+
+async def ensure_live_dm(day, refresh=False):
+    setup_cayo_db()
+    key = day.isoformat()
+    with get_db() as db:
+        record = db.execute('SELECT * FROM cayo_dm_panels WHERE work_date=?', (key,)).fetchone()
+        if record and record['status'] == 'closed':
+            return
+        if not record:
+            db.execute('INSERT OR IGNORE INTO cayo_dm_panels(work_date,status) VALUES (?,?)', (key, 'open'))
+            record = db.execute('SELECT * FROM cayo_dm_panels WHERE work_date=?', (key,)).fetchone()
+    dm = await owner_dm()
+    msg = None
+    if record['message_id']:
+        try:
+            msg = await dm.fetch_message(int(record['message_id']))
+        except discord.NotFound:
+            pass
+    if msg is None:
+        msg = await dm.send(embed=live_embed(day))
+        with get_db() as db:
+            db.execute('UPDATE cayo_dm_panels SET message_id=? WHERE work_date=? AND status=?', (msg.id, key, 'open'))
+    elif refresh:
+        await msg.edit(embed=live_embed(day))
+
+
+async def update_live_dm():
+    moment = now()
+    if moment.time() < OPEN_TIME:
+        return
+    try:
+        await ensure_live_dm(work_date_for(moment), refresh=True)
+    except (discord.Forbidden, discord.HTTPException):
+        log.exception('Nu pot trimite/actualiza DM-ul Pontaj Cayo; verifica mesajele private.')
+    except Exception:
+        log.exception('Eroare actualizare panou Cayo DM')
+
+
+async def close_day_at_midnight(day):
+    # Se foloseste ora exacta 00:00 a zilei urmatoare, chiar daca botul
+    # reporneste mai tarziu. Datele sunt salvate inainte de editarea Discord.
+    cutoff = datetime.combine(day + timedelta(days=1), time.min, tzinfo=TZ)
+    stamp = cutoff.isoformat(timespec='seconds')
+    setup_cayo_db()
+    with get_db() as db:
+        db.execute('''UPDATE cayo_attendance SET ended_at=?, closed_by_id=?
+                      WHERE ended_at IS NULL AND started_at < ?''',
+                   (stamp, bot.user.id if bot.user else DM_OWNER, stamp))
+        rows = db.execute('''SELECT * FROM cayo_attendance
+                             WHERE ended_at=? AND closed_by_id=?''',
+                          (stamp, bot.user.id if bot.user else DM_OWNER)).fetchall()
+        db.execute('''UPDATE cayo_dm_panels SET status='closed' WHERE work_date=?''', (day.isoformat(),))
+        record = db.execute('SELECT * FROM cayo_dm_panels WHERE work_date=?', (day.isoformat(),)).fetchone()
+    # Refacem panourile individuale inchise automat.
+    try:
+        ch = await cayo_channel()
+        for row in rows:
+            try:
+                msg = await ch.fetch_message(int(row['message_id'])) if row['message_id'] else None
+                if msg:
+                    await msg.edit(embed=panel(row))
+            except (discord.NotFound, discord.Forbidden, discord.HTTPException):
+                log.exception('Nu pot actualiza panoul Cayo #%s', row['id'])
+    except (discord.Forbidden, discord.HTTPException):
+        log.exception('Canal Cayo indisponibil la inchidere')
+    if record and record['message_id']:
+        try:
+            dm = await owner_dm()
+            msg = await dm.fetch_message(int(record['message_id']))
+            await msg.edit(embed=live_embed(day, closed=True))
+        except (discord.NotFound, discord.Forbidden, discord.HTTPException):
+            log.exception('Nu pot inchide panoul DM Cayo pentru %s', day)
+
+
+async def cayo_dm_scheduler():
     while not bot.is_closed():
         try:
-            await _auto_close_previous_days()
-            await _auto_open_today()
+            moment = now()
+            setup_cayo_db()
+            with get_db() as db:
+                open_days = [r['work_date'] for r in db.execute(
+                    "SELECT work_date FROM cayo_dm_panels WHERE status='open' AND work_date < ?",
+                    (moment.date().isoformat(),)).fetchall()]
+            for key in open_days:
+                await close_day_at_midnight(datetime.fromisoformat(key).date())
+            if moment.time() >= OPEN_TIME:
+                await ensure_live_dm(moment.date())
         except asyncio.CancelledError:
             raise
-        except Exception as error:
-            print(f"❌ Eroare program automat pontaj: {type(error).__name__}: {error}")
-
-        # Verificam des, inclusiv la trecerea in ziua urmatoare.
-        # Nu garantam executia exact la secunda 00:00 daca Discord/Railway
-        # este indisponibil; ora salvata pentru inchidere ramane 00:00:00.
-        await asyncio.sleep(5)
+        except Exception:
+            log.exception('Eroare scheduler DM Cayo')
+        await asyncio.sleep(10)
 
 
-async def _auto_attendance_on_ready():
-    global _auto_attendance_task
-    if _auto_attendance_task is None or _auto_attendance_task.done():
-        _auto_attendance_task = asyncio.create_task(_auto_attendance_loop())
-        print('🕐 Program pontaj automat activ: 19:45 - 00:00 (Europe/Bucharest).')
+async def start_cayo_dm_scheduler():
+    global _dm_task
+    if _dm_task is None or _dm_task.done():
+        _dm_task = asyncio.create_task(cayo_dm_scheduler())
+        log.info('Scheduler DM Cayo pornit: 19:45 - 00:00 Europe/Bucharest')
 
 
-bot.add_listener(_auto_attendance_on_ready, 'on_ready')
+bot.add_listener(start_cayo_dm_scheduler, 'on_ready')
